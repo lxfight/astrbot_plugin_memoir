@@ -1,0 +1,96 @@
+{
+  "background_llm_provider": {
+    "description": "后台小模型",
+    "type": "string",
+    "hint": "用于记忆编码判定、巩固升华、洞察归纳的模型，建议使用成本更低的模型。留空则回退使用当前对话模型。",
+    "obvious_hint": true,
+    "_special": "select_provider",
+    "default": ""
+  },
+  "enable_private_memory": {
+    "description": "启用私聊记忆",
+    "type": "bool",
+    "default": true
+  },
+  "enable_group_memory": {
+    "description": "启用群聊记忆",
+    "type": "bool",
+    "default": true
+  },
+  "group_prefilter_min_length": {
+    "description": "群聊消息判定的最短长度",
+    "type": "int",
+    "hint": "短于该长度的群消息直接忽略，不进入编码判定",
+    "default": 10
+  },
+  "group_prefilter_sample_rate": {
+    "description": "群聊背景消息随机采样率",
+    "type": "float",
+    "hint": "未命中规则（@机器人/关键词）的群消息，按该概率抽样送入编码判定，0 表示关闭随机采样",
+    "default": 0.03
+  },
+  "consolidation_scan_interval_minutes": {
+    "description": "巩固扫描周期（分钟）",
+    "type": "int",
+    "hint": "后台周期性扫描所有会话，检查是否满足巩固条件",
+    "default": 30
+  },
+  "consolidation_count_threshold_private": {
+    "description": "私聊巩固触发阈值（条数）",
+    "type": "int",
+    "default": 8
+  },
+  "consolidation_count_threshold_group": {
+    "description": "群聊巩固触发阈值（条数）",
+    "type": "int",
+    "default": 30
+  },
+  "consolidation_idle_hours": {
+    "description": "巩固触发的静默时长（小时）",
+    "type": "int",
+    "hint": "距上次巩固超过该时长，且存在未处理的新记忆时，即使未达数量阈值也会触发巩固",
+    "default": 12
+  },
+  "recall_top_k": {
+    "description": "单次召回注入的记忆条数上限",
+    "type": "int",
+    "default": 5
+  },
+  "enable_cross_scope_bridge": {
+    "description": "允许群聊记忆桥接进私聊",
+    "type": "bool",
+    "hint": "开启后，已授权用户在群聊中的自我陈述会同时写入其私聊记忆。默认关闭。",
+    "default": false
+  },
+  "bridge_max_sensitivity": {
+    "description": "桥接允许的最高敏感度",
+    "type": "string",
+    "hint": "low：仅日常事实；medium：含一般隐私；high：不限制（不建议）",
+    "options": ["low", "medium", "high"],
+    "default": "low"
+  },
+  "decay_rate_episodic": {
+    "description": "情景记忆衰减系数",
+    "type": "float",
+    "hint": "每个巩固扫描周期施加一次的强度保留比例（0-1），越小衰减越快。情景记忆细节应最先被遗忘。",
+    "default": 0.85
+  },
+  "decay_rate_semantic": {
+    "description": "语义记忆衰减系数",
+    "type": "float",
+    "hint": "语义记忆是已巩固的稳定认知，衰减应远慢于情景记忆。",
+    "default": 0.98
+  },
+  "decay_rate_insight": {
+    "description": "洞察衰减系数",
+    "type": "float",
+    "hint": "洞察是巩固后的精华，几乎不应被遗忘。",
+    "default": 0.995
+  },
+  "min_strength_to_keep": {
+    "description": "情景记忆最低保留强度",
+    "type": "float",
+    "hint": "情景记忆强度低于该值时被物理删除（真正遗忘）。仅对情景记忆生效，语义记忆/洞察不做物理删除。",
+    "default": 0.05
+  }
+}

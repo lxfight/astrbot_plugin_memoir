@@ -1,0 +1,11 @@
+[project]
+name = "astrbot-plugin-memoir"
+version = "0.1.0"
+description = "模拟人脑记忆闭环的 AstrBot 长期记忆插件"
+requires-python = ">=3.10"
+dependencies = [
+    "aiosqlite>=0.19.0",
+]
+
+[tool.uv]
+package = false
