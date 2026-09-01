@@ -5,7 +5,9 @@
 原文逐字保留，写入无信息损失，抽取质量也比逐轮孤立判定更高。
 
 - 私聊：on_llm_response 后把「用户 + 助手」完整一轮落库。
-- 群聊：被动捕获每条消息落库（此前为控制 LLM 成本的两级门控已无存在必要）。
+- 群聊：被动捕获每条消息落库（此前为控制 LLM 成本的两级门控已无存在必要）；
+  机器人自己的回复在 on_llm_response 后补记——被动捕获只覆盖入站消息，
+  若不补记 bot 侧，群聊巩固时提取的认知会缺失机器人说过什么的上下文。
 """
 
 from __future__ import annotations
@@ -64,6 +66,43 @@ async def handle_private_response(
         scope_type=scope.scope_type,
         scope_key=scope.scope_key,
         content=content[:_MAX_CONTENT_LENGTH],
+    )
+    await store.touch_scope(scope.scope_type, scope.scope_key)
+
+
+async def handle_group_response(
+    context,
+    config: dict,
+    store: MemoryStore,
+    event: AstrMessageEvent,
+    resp: LLMResponse,
+) -> None:
+    """群聊场景：机器人自己的回复落库（用户侧消息已由被动捕获落库）。
+
+    Args:
+        context: AstrBot 上下文（与私聊落库保持一致签名，当前未使用）。
+        config: 全局配置字典，调用侧会先合并会话覆盖。
+        store: 记忆存储实例。
+        event: 触发本次 LLM 响应的群聊事件。
+        resp: LLM 响应，取 completion_text 作为 bot 侧原文。
+    """
+    if not config.get("enable_group_memory", True):
+        return
+    assistant_text = (resp.completion_text or "").strip()
+    if not assistant_text:
+        return
+    scope = resolve_scope(event)
+    config = merge_scope_config(
+        config,
+        await store.get_scope_config(scope.scope_type, scope.scope_key),
+        scope.scope_type,
+    )
+    if not config.get("scope_enabled", True):
+        return
+    await store.insert_raw_turn(
+        scope_type=scope.scope_type,
+        scope_key=scope.scope_key,
+        content=f"助手: {assistant_text}"[:_MAX_CONTENT_LENGTH],
     )
     await store.touch_scope(scope.scope_type, scope.scope_key)
 

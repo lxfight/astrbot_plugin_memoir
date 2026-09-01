@@ -14,7 +14,11 @@ from astrbot.api.provider import LLMResponse, ProviderRequest
 
 from .consolidation import ConsolidationScheduler
 from .memory_recall import handle_recall
-from .memory_writer import handle_group_message, handle_private_response
+from .memory_writer import (
+    handle_group_message,
+    handle_group_response,
+    handle_private_response,
+)
 from .storage import MemoryStore
 
 
@@ -41,11 +45,15 @@ class EventHandler:
         await handle_recall(self.context, self.config, self.store, event, req)
 
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse) -> None:
-        # 群聊捕获完全交给被动捕获 on_group_message（每条消息原文落库）。
-        # 这里只在私聊落库：私聊没有被动捕获，需要在 LLM 响应后把
-        # 「用户 + 助手」完整一轮一起落库。
+        # 私聊：on_llm_response 后把「用户 + 助手」完整一轮落库。
+        # 群聊：用户侧由被动捕获覆盖，这里补记机器人自己的回复，
+        # 否则群聊巩固时缺失 bot 侧上下文。
         if event.is_private_chat():
             await handle_private_response(
+                self.context, self.config, self.store, event, resp
+            )
+        else:
+            await handle_group_response(
                 self.context, self.config, self.store, event, resp
             )
 
