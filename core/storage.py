@@ -895,8 +895,11 @@ class MemoryStore:
         激活指写入、更新或召回强化（三者都会把 updated_at 刷新为当前时刻）。
         与巩固扫描周期无关——调整扫描频率不会改变遗忘速度，长时间停机后的
         首次扫描也会一次性补齐期间累积的衰减；重复执行幂等，不会像逐次
-        相乘那样在陈旧强度上叠加。容量淘汰由 prune_semantic 按同一优先级
-        处理；原始轮次的遗忘由 prune_raw 按 TTL + 容量上限处理。
+        相乘那样在陈旧强度上叠加。重算结果与现值差异在容差内的行跳过写入，
+        避免每个扫描周期对全部记忆做无效 UPDATE；被跳过的行会在差值累积
+        超过容差后的某轮扫描中补写，排序精度不受影响。容量淘汰由
+        prune_semantic 按同一优先级处理；原始轮次的遗忘由 prune_raw 按
+        TTL + 容量上限处理。
 
         Args:
             decay_rate_semantic: 语义记忆每自然日的强度保留比例（0-1）。
@@ -910,7 +913,7 @@ class MemoryStore:
         }
         now = int(time.time())
         async with self.connection.execute(
-            "SELECT id, memory_type, updated_at FROM memories "
+            "SELECT id, memory_type, updated_at, strength FROM memories "
             "WHERE memory_type IN ('semantic', 'insight')"
         ) as cursor:
             rows = await cursor.fetchall()
@@ -920,7 +923,12 @@ class MemoryStore:
             if rate is None:
                 continue
             days = max(0.0, (now - row["updated_at"]) / 86400.0)
-            updates.append((rate**days, row["id"]))
+            strength = rate**days
+            # 差值在容差内不写：相邻扫描周期 seconds 级时间差引起的强度变化
+            # 远小于排序所需的精度，全部重写只会放大 WAL 写入量
+            if abs(strength - row["strength"]) < 0.001:
+                continue
+            updates.append((strength, row["id"]))
         if updates:
             await self.connection.executemany(
                 "UPDATE memories SET strength = ? WHERE id = ?", updates

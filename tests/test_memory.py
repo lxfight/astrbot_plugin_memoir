@@ -272,6 +272,25 @@ async def test_reinforce_resets_decay_clock():
     await store.close()
 
 
+@pytest.mark.asyncio
+async def test_decay_skips_writes_within_tolerance():
+    store = await _make_store()
+    mid = await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="安静的记忆",
+    )
+    await _backdate_memory(store, mid, 0.1)
+    await store.decay_and_forget(0.98, 0.995)
+    before = (await store.get_scope_memories("private", "p:1"))[0]["strength"]
+    # 秒级时间差引起的强度变化在容差内，不应产生新的写入
+    await store.decay_and_forget(0.98, 0.995)
+    after = (await store.get_scope_memories("private", "p:1"))[0]["strength"]
+    assert after == before
+    await store.close()
+
+
 # ==================== store: semantic capacity ====================
 
 
