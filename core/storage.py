@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
-
 from astrbot.api import logger
 
 SCHEMA_SQL = """

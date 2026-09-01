@@ -19,11 +19,6 @@ import json
 import time
 
 import pytest
-from core import consolidation as consolidation_module
-from core.consolidation import run_consolidation_pass, run_forgetting_pass
-from core.event_handler import EventHandler
-from core.storage import MemoryStore
-
 from astrbot.api.provider import LLMResponse
 from astrbot.core.message.components import Image, Plain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
@@ -35,6 +30,11 @@ from astrbot.core.platform.astrbot_message import (
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.platform_metadata import PlatformMetadata
 from astrbot.core.provider.entities import ProviderRequest
+
+from core import consolidation as consolidation_module
+from core.consolidation import run_consolidation_pass, run_forgetting_pass
+from core.event_handler import EventHandler
+from core.storage import MemoryStore
 
 PLATFORM = "test"
 

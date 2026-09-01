@@ -1,0 +1,60 @@
+name: Bug 报告
+description: 报告插件运行中的问题
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 简要说明遇到了什么问题（记忆不生效、报错、WebUI 异常等）
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 在私聊/群聊中发送 …
+        2. 打开 WebUI 记忆管理页 …
+        3. 出现 …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: 控制台或 data/logs 中的报错堆栈（请勿泄露 API Key 等敏感信息）
+      render: shell
+    validations:
+      required: false
+  - type: input
+    id: astrbot-version
+    attributes:
+      label: AstrBot 版本
+      placeholder: v4.x.x
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 聊天平台
+      options:
+        - aiocqhttp (QQ)
+        - 微信
+        - WebChat
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 使用的模型提供者、插件配置（可脱敏）等
+    validations:
+      required: false

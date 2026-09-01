@@ -9,6 +9,7 @@ import json
 import time
 
 import pytest
+
 from core import consolidation as consolidation_module
 from core.consolidation import (
     _apply_insight,
