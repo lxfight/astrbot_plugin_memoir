@@ -10,45 +10,37 @@
   "enable_private_memory": {
     "description": "启用私聊记忆",
     "type": "bool",
-    "default": true
+    "default": true,
+    "hint": "关闭后所有私聊不进行记忆捕获与召回；可在 WebUI「记忆管理 → 会话配置」中按会话单独覆盖"
   },
   "enable_group_memory": {
     "description": "启用群聊记忆",
     "type": "bool",
-    "default": true
-  },
-  "group_prefilter_min_length": {
-    "description": "群聊消息判定的最短长度",
-    "type": "int",
-    "hint": "短于该长度的群消息直接忽略，不进入编码判定",
-    "default": 10
-  },
-  "group_prefilter_sample_rate": {
-    "description": "群聊背景消息随机采样率",
-    "type": "float",
-    "hint": "未命中规则（@机器人/关键词）的群消息，按该概率抽样送入编码判定，0 表示关闭随机采样",
-    "default": 0.03
+    "default": true,
+    "hint": "关闭后所有群聊不进行记忆捕获与召回；可在 WebUI「记忆管理 → 会话配置」中按会话单独覆盖"
   },
   "consolidation_scan_interval_minutes": {
     "description": "巩固扫描周期（分钟）",
     "type": "int",
-    "hint": "后台周期性扫描所有会话，检查是否满足巩固条件",
+    "hint": "后台周期性扫描所有会话，检查是否满足批量抽取条件",
     "default": 30
   },
   "consolidation_count_threshold_private": {
-    "description": "私聊巩固触发阈值（条数）",
+    "description": "私聊抽取触发阈值（原始轮次数）",
     "type": "int",
-    "default": 8
+    "hint": "积攒的未抽取原始对话轮次达到该数量后触发一次批量抽取（每次触发只调 1 次后台模型）；可在 WebUI 中按会话覆盖",
+    "default": 20
   },
   "consolidation_count_threshold_group": {
-    "description": "群聊巩固触发阈值（条数）",
+    "description": "群聊抽取触发阈值（原始轮次数）",
     "type": "int",
-    "default": 30
+    "default": 50,
+    "hint": "；可在 WebUI 中按会话覆盖"
   },
   "consolidation_idle_hours": {
     "description": "巩固触发的静默时长（小时）",
     "type": "int",
-    "hint": "距上次巩固超过该时长，且存在未处理的新记忆时，即使未达数量阈值也会触发巩固",
+    "hint": "距上次巩固超过该时长，且存在未处理的新记忆时，即使未达数量阈值也会触发巩固；可在 WebUI 中按会话覆盖",
     "default": 12
   },
   "recall_top_k": {
@@ -56,29 +48,39 @@
     "type": "int",
     "default": 5
   },
+  "recall_core_top_k": {
+    "description": "常驻记忆注入条数",
+    "type": "int",
+    "hint": "每次对话固定注入的语义记忆/洞察条数（按重要度×强度排序），模拟「对一个人的稳定认知」，0 表示关闭常驻层",
+    "default": 3
+  },
+  "recall_recent_turns": {
+    "description": "群聊近因层注入条数",
+    "type": "int",
+    "hint": "群聊召回时注入最近几条原始对话，补上群聊没有会话历史的短板，0 表示关闭（私聊已有会话历史，不受此项影响）",
+    "default": 5
+  },
   "enable_cross_scope_bridge": {
     "description": "允许群聊记忆桥接进私聊",
     "type": "bool",
-    "hint": "开启后，已授权用户在群聊中的自我陈述会同时写入其私聊记忆。默认关闭。",
+    "hint": "开启后，已授权用户在群聊中的自我陈述会同时写入其私聊记忆；可在 WebUI 中按群聊单独开关。默认关闭。",
     "default": false
   },
   "bridge_max_sensitivity": {
     "description": "桥接允许的最高敏感度",
     "type": "string",
-    "hint": "low：仅日常事实；medium：含一般隐私；high：不限制（不建议）",
-    "options": ["low", "medium", "high"],
+    "hint": "low：仅日常事实；medium：含一般隐私；high：不限制（不建议）；可在 WebUI 中按会话覆盖",
+    "options": [
+      "low",
+      "medium",
+      "high"
+    ],
     "default": "low"
-  },
-  "decay_rate_episodic": {
-    "description": "情景记忆衰减系数",
-    "type": "float",
-    "hint": "每个巩固扫描周期施加一次的强度保留比例（0-1），越小衰减越快。情景记忆细节应最先被遗忘。",
-    "default": 0.85
   },
   "decay_rate_semantic": {
     "description": "语义记忆衰减系数",
     "type": "float",
-    "hint": "语义记忆是已巩固的稳定认知，衰减应远慢于情景记忆。",
+    "hint": "语义记忆是已巩固的稳定认知，每个巩固周期施加一次强度保留比例（0-1），越小衰减越快。",
     "default": 0.98
   },
   "decay_rate_insight": {
@@ -87,10 +89,10 @@
     "hint": "洞察是巩固后的精华，几乎不应被遗忘。",
     "default": 0.995
   },
-  "min_strength_to_keep": {
-    "description": "情景记忆最低保留强度",
-    "type": "float",
-    "hint": "情景记忆强度低于该值时被物理删除（真正遗忘）。仅对情景记忆生效，语义记忆/洞察不做物理删除。",
-    "default": 0.05
+  "raw_retention_days": {
+    "description": "原始对话保留天数",
+    "type": "int",
+    "hint": "原始对话轮次超过该天数后物理删除（真正遗忘），0 表示不按时间清理；同时受单会话容量上限约束",
+    "default": 14
   }
 }

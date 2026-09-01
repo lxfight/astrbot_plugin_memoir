@@ -12,7 +12,6 @@ is_wake 置为 True，导致每条群消息都触发机器人回复/LLM 调用�
 
 from __future__ import annotations
 
-import asyncio
 import weakref
 from typing import Any
 
@@ -30,6 +29,13 @@ def set_active_plugin(plugin: Any) -> None:
     _ACTIVE_PLUGIN_REF = weakref.ref(plugin) if plugin is not None else None
 
 
+def clear_active_plugin(plugin: Any) -> None:
+    """插件终止时调用；仅当弱引用仍指向该实例时清除，避免影响重载后的新实例"""
+    global _ACTIVE_PLUGIN_REF
+    if _ACTIVE_PLUGIN_REF is not None and _ACTIVE_PLUGIN_REF() is plugin:
+        _ACTIVE_PLUGIN_REF = None
+
+
 def _get_active_plugin() -> Any:
     if _ACTIVE_PLUGIN_REF is None:
         return None
@@ -37,7 +43,7 @@ def _get_active_plugin() -> Any:
 
 
 class PassiveGroupCaptureFilter(CustomFilter):
-    """捕获所有群消息用于编码，但不唤醒机器人回复"""
+    """捕获所有群消息用于落库，但不唤醒机器人回复"""
 
     def __init__(self, raise_error: bool = True, **kwargs) -> None:
         super().__init__(raise_error=raise_error)
@@ -50,9 +56,6 @@ class PassiveGroupCaptureFilter(CustomFilter):
         plugin = _get_active_plugin()
         if plugin is None:
             return False
-        try:
-            asyncio.create_task(plugin._dispatch_group_capture(event))
-        except RuntimeError:
-            # 无运行中的事件循环（极端情况），忽略本次捕获
-            pass
+        # 任务由插件创建并跟踪，terminate 时统一取消
+        plugin.submit_group_capture(event)
         return False

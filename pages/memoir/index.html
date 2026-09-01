@@ -1,0 +1,1506 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>记忆管理 - Memoir</title>
+    <script src="https://cdn.jsdelivr.net/npm/lucide@0.469.0/dist/umd/lucide.min.js"></script>
+    <style>
+      :root {
+        --bg: #f7f7f8;
+        --surface: #ffffff;
+        --surface-hover: #f4f4f6;
+        --border: #e6e6ea;
+        --hairline: #efeff2;
+        --dot: rgba(24, 24, 27, 0.04);
+        --text: #18181b;
+        --text-dim: #71717a;
+        --text-faint: #a1a1aa;
+        --accent: #5e6ad2;
+        --accent-soft: rgba(94, 106, 210, 0.09);
+        --accent-border: rgba(94, 106, 210, 0.35);
+        --violet: #8b5cf6;
+        --violet-soft: rgba(139, 92, 246, 0.09);
+        --teal: #0d9488;
+        --teal-soft: rgba(13, 148, 136, 0.09);
+        --amber: #b45309;
+        --amber-soft: rgba(217, 119, 6, 0.1);
+        --danger: #e5484d;
+        --danger-soft: rgba(229, 72, 77, 0.08);
+        --ok: #16803c;
+        --ok-soft: rgba(22, 163, 74, 0.09);
+        --shadow: 0 1px 2px rgba(16, 16, 18, 0.04);
+        --shadow-lift: 0 6px 18px rgba(16, 16, 18, 0.08);
+        --sidebar-w: 248px;
+      }
+      html[data-theme="dark"] {
+        --bg: #101012;
+        --surface: #17171a;
+        --surface-hover: #1e1e23;
+        --border: #26262b;
+        --hairline: #202024;
+        --dot: rgba(236, 236, 238, 0.045);
+        --text: #ececee;
+        --text-dim: #8b8b93;
+        --text-faint: #5c5c63;
+        --accent: #7c81f2;
+        --accent-soft: rgba(124, 129, 242, 0.14);
+        --accent-border: rgba(124, 129, 242, 0.4);
+        --violet: #a78bfa;
+        --violet-soft: rgba(167, 139, 250, 0.13);
+        --teal: #2dd4bf;
+        --teal-soft: rgba(45, 212, 191, 0.12);
+        --amber: #fbbf24;
+        --amber-soft: rgba(251, 191, 36, 0.12);
+        --danger: #f0666b;
+        --danger-soft: rgba(240, 102, 107, 0.12);
+        --ok: #4ade80;
+        --ok-soft: rgba(74, 222, 128, 0.12);
+        --shadow: none;
+        --shadow-lift: none;
+      }
+      * { box-sizing: border-box; }
+      html { height: 100%; }
+      body {
+        margin: 0 auto;
+        max-width: 1240px;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        padding: 22px 28px 28px;
+        background-color: var(--bg);
+        background-image: radial-gradient(circle, var(--dot) 1px, transparent 1px);
+        background-size: 22px 22px;
+        color: var(--text);
+        font: 14px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC",
+          "Segoe UI", "Microsoft YaHei", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      button { font: inherit; color: inherit; }
+      svg.lucide { width: 15px; height: 15px; stroke-width: 1.75; flex-shrink: 0; }
+
+      /* ---------- particle canvas ---------- */
+      #fx {
+        position: fixed; inset: 0; z-index: 0;
+        pointer-events: none;
+      }
+      .page { position: relative; z-index: 1; display: flex; flex-direction: column; min-height: 100vh; }
+
+      /* ---------- entrance animations ---------- */
+      @keyframes fadeSlideUp {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      @keyframes fadeSlideRight {
+        from { opacity: 0; transform: translateX(-12px); }
+        to { opacity: 1; transform: translateX(0); }
+      }
+      @keyframes fadeSlideLeft {
+        from { opacity: 0; transform: translateX(10px); }
+        to { opacity: 1; transform: translateX(0); }
+      }
+      @keyframes popIn {
+        from { opacity: 0; transform: scale(0.92); }
+        to { opacity: 1; transform: scale(1); }
+      }
+      @keyframes floatY {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-6px); }
+      }
+      @keyframes pulse {
+        0%, 100% { box-shadow: 0 0 0 0 var(--amber-soft); opacity: 1; }
+        50% { box-shadow: 0 0 0 5px transparent; opacity: 0.75; }
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @keyframes breathe {
+        0%, 100% { opacity: 0.55; transform: scale(1); }
+        50% { opacity: 1; transform: scale(1.05); }
+      }
+      .anim-in { animation: fadeSlideUp 0.32s cubic-bezier(0.22, 0.8, 0.36, 1) both; }
+
+      /* ---------- header ---------- */
+      .page-head {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 16px; margin-bottom: 16px;
+        animation: fadeSlideUp 0.4s cubic-bezier(0.22, 0.8, 0.36, 1) both;
+      }
+      .title-wrap { display: flex; gap: 13px; align-items: center; }
+      .brand-icon {
+        width: 20px; height: 20px; padding: 10px; box-sizing: content-box;
+        border-radius: 12px; background: var(--surface);
+        color: var(--accent); border: 1px solid var(--accent-border);
+        box-shadow: var(--shadow);
+        animation: breathe 4s ease-in-out infinite;
+      }
+      h1 { font-size: 16px; font-weight: 650; margin: 0; letter-spacing: 0.01em; }
+      .sub { color: var(--text-dim); font-size: 12.5px; margin: 1px 0 0; }
+      .head-actions { display: flex; gap: 8px; align-items: center; }
+
+      .icon-btn {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 32px; height: 32px; border-radius: 8px;
+        border: 1px solid var(--border); background: var(--surface);
+        color: var(--text-dim); cursor: pointer; transition: all 0.15s;
+      }
+      .icon-btn:hover { color: var(--text); border-color: var(--text-faint); transform: translateY(-1px); }
+      .icon-btn:active { transform: scale(0.92); }
+      .icon-btn:disabled { opacity: 0.4; cursor: default; transform: none; }
+      .icon-btn.danger:hover { color: var(--danger); border-color: var(--danger); }
+      .icon-btn.spinning svg { animation: spin 0.8s linear infinite; }
+
+      /* ---------- stats ---------- */
+      .stats {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        gap: 10px; margin-bottom: 12px;
+      }
+      .stat {
+        display: flex; align-items: center; gap: 12px;
+        background: var(--surface); border: 1px solid var(--border);
+        border-radius: 12px; padding: 13px 15px; box-shadow: var(--shadow);
+        transition: transform 0.18s, box-shadow 0.18s, border-color 0.18s;
+        animation: popIn 0.4s cubic-bezier(0.22, 0.8, 0.36, 1) backwards;
+      }
+      .stat:hover { transform: translateY(-3px); box-shadow: var(--shadow-lift); }
+      .stat .chip {
+        width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0;
+        display: flex; align-items: center; justify-content: center;
+        transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+      }
+      .stat:hover .chip { transform: scale(1.12) rotate(-6deg); }
+      .stat .chip svg { width: 17px; height: 17px; }
+      .stat .num { font-size: 20px; font-weight: 650; line-height: 1.15; font-variant-numeric: tabular-nums; }
+      .stat .label { font-size: 12px; color: var(--text-dim); }
+      .stat.c-scope .chip { background: var(--accent-soft); color: var(--accent); }
+      .stat.c-memory .chip { background: var(--violet-soft); color: var(--violet); }
+      .stat.c-raw .chip { background: var(--teal-soft); color: var(--teal); }
+      .stat.c-pending .chip { background: var(--amber-soft); color: var(--amber); }
+
+      /* ---------- split layout ---------- */
+      .split { flex: 1; display: flex; gap: 12px; min-height: 0; animation: fadeSlideUp 0.45s 0.12s cubic-bezier(0.22, 0.8, 0.36, 1) backwards; }
+      .sidebar {
+        width: var(--sidebar-w); flex-shrink: 0;
+        display: flex; flex-direction: column; min-height: 0;
+        background: var(--surface); border: 1px solid var(--border);
+        border-radius: 14px; box-shadow: var(--shadow); overflow: hidden;
+      }
+      .sidebar-search { padding: 10px; border-bottom: 1px solid var(--hairline); }
+      .search-wrap {
+        display: flex; align-items: center; gap: 7px;
+        background: var(--bg); border: 1px solid var(--border);
+        border-radius: 8px; padding: 0 10px; height: 32px;
+        color: var(--text-faint); transition: border-color 0.15s, box-shadow 0.15s;
+      }
+      .search-wrap:focus-within { border-color: var(--accent-border); box-shadow: 0 0 0 3px var(--accent-soft); }
+      .search-wrap svg { width: 14px; height: 14px; transition: transform 0.2s; }
+      .search-wrap:focus-within svg { transform: scale(1.15); color: var(--accent); }
+      .search-wrap input {
+        flex: 1; min-width: 0; background: transparent; border: none; outline: none;
+        color: var(--text); font-size: 13px; height: 100%;
+      }
+      .search-wrap input::placeholder { color: var(--text-faint); }
+      .scope-list { flex: 1; overflow-y: auto; padding: 6px; }
+      .group-title {
+        padding: 10px 10px 4px; font-size: 11px; font-weight: 600;
+        letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-faint);
+        display: flex; align-items: center; gap: 6px;
+      }
+      .group-title .count {
+        margin-left: auto; font-weight: 500; color: var(--text-faint);
+        background: var(--surface-hover); border-radius: 999px; padding: 0 7px;
+        font-variant-numeric: tabular-nums;
+      }
+      .scope-item {
+        display: flex; align-items: center; gap: 10px; width: 100%;
+        padding: 8px 9px; border: none; background: transparent;
+        border-radius: 8px; cursor: pointer; text-align: left;
+        transition: background 0.15s, transform 0.15s;
+        animation: fadeSlideRight 0.3s cubic-bezier(0.22, 0.8, 0.36, 1) backwards;
+      }
+      .scope-item:hover { background: var(--surface-hover); transform: translateX(2px); }
+      .scope-item:active { transform: scale(0.98); }
+      .scope-item.active { background: var(--accent-soft); transform: none; }
+      .scope-item .chip {
+        width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
+        display: flex; align-items: center; justify-content: center;
+        background: var(--surface-hover); color: var(--text-dim);
+        transition: all 0.15s;
+      }
+      .scope-item.active .chip { background: var(--surface); color: var(--accent); transform: scale(1.06); }
+      .scope-item .info { flex: 1; min-width: 0; }
+      .scope-item .name {
+        font-size: 13px; font-weight: 500; color: var(--text);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .scope-item .meta { font-size: 11.5px; color: var(--text-faint); }
+      .scope-item .meta .pending { color: var(--amber); }
+      .badge-dot {
+        width: 7px; height: 7px; border-radius: 50%; background: var(--amber); flex-shrink: 0;
+        animation: breathe 1.6s ease-in-out infinite;
+      }
+      .disabled-tag {
+        font-size: 10.5px; color: var(--text-faint);
+        border: 1px solid var(--hairline); border-radius: 4px; padding: 0 4px; margin-left: 6px;
+      }
+
+      /* ---------- detail ---------- */
+      .detail {
+        flex: 1; min-width: 0; display: flex; flex-direction: column;
+        background: var(--surface); border: 1px solid var(--border);
+        border-radius: 14px; box-shadow: var(--shadow); overflow: hidden;
+      }
+      .detail-head {
+        display: flex; align-items: center; gap: 10px;
+        padding: 12px 16px; border-bottom: 1px solid var(--hairline);
+        animation: fadeSlideUp 0.3s cubic-bezier(0.22, 0.8, 0.36, 1) backwards;
+      }
+      .detail-head .chip {
+        width: 34px; height: 34px; border-radius: 9px; flex-shrink: 0;
+        display: flex; align-items: center; justify-content: center;
+        background: var(--accent-soft); color: var(--accent);
+        transition: transform 0.2s;
+      }
+      .detail-head .chip:hover { transform: scale(1.08) rotate(-4deg); }
+      .detail-head .name { font-size: 14px; font-weight: 600; }
+      .detail-head .sub { font-size: 12px; }
+      .status-badge {
+        display: inline-flex; align-items: center; gap: 4px;
+        font-size: 11.5px; padding: 1px 8px; border-radius: 5px;
+        animation: popIn 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
+      }
+      .status-badge.off { color: var(--danger); background: var(--danger-soft); }
+      .status-badge.custom { color: var(--teal); background: var(--teal-soft); }
+      .status-badge svg { width: 12px; height: 12px; }
+
+      .tabs { display: flex; align-items: center; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--hairline); }
+      .tab-search { height: 28px; max-width: 240px; flex: 0 1 240px; margin: 4px 0; }
+      .spacer { flex: 1; }
+      .tab {
+        display: flex; align-items: center; gap: 6px;
+        padding: 10px 12px; cursor: pointer; user-select: none;
+        color: var(--text-dim); font-size: 13px; font-weight: 500;
+        border-bottom: 2px solid transparent; margin-bottom: -1px;
+        transition: color 0.15s, border-color 0.15s, transform 0.15s;
+        background: none; border-top: none; border-left: none; border-right: none;
+      }
+      .tab:hover { color: var(--text); transform: translateY(-1px); }
+      .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+      .tab svg { width: 14px; height: 14px; transition: transform 0.2s; }
+      .tab.active svg { transform: scale(1.12); }
+
+      .content { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
+      .list-pad { padding: 2px 8px; }
+
+      /* ---------- memory list items ---------- */
+      .item {
+        display: flex; align-items: flex-start; gap: 12px;
+        padding: 11px 10px; border-bottom: 1px solid var(--hairline);
+        border-radius: 8px; transition: background 0.15s, transform 0.15s;
+        animation: fadeSlideUp 0.3s cubic-bezier(0.22, 0.8, 0.36, 1) backwards;
+      }
+      .item:hover { background: var(--surface-hover); transform: translateX(2px); }
+      .item:last-child { border-bottom-color: transparent; }
+      .item-body { flex: 1; min-width: 0; }
+      .item-content { font-size: 13.5px; word-break: break-word; white-space: pre-wrap; }
+      .item-meta {
+        display: flex; gap: 12px; flex-wrap: wrap; margin-top: 3px;
+        font-size: 12px; color: var(--text-faint); font-variant-numeric: tabular-nums;
+      }
+      .item-meta .who { color: var(--text-dim); }
+
+      .badge {
+        flex-shrink: 0; margin-top: 2px; padding: 1px 8px;
+        border-radius: 5px; font-size: 11.5px; font-weight: 500; line-height: 18px;
+        transition: transform 0.15s;
+      }
+      .item:hover .badge { transform: scale(1.05); }
+      .badge.t-semantic { color: var(--accent); background: var(--accent-soft); }
+      .badge.t-insight { color: var(--violet); background: var(--violet-soft); }
+      .badge.t-raw, .badge.t-episodic {
+        color: var(--text-dim); background: transparent; border: 1px solid var(--hairline);
+      }
+
+      /* ---------- chat bubbles (raw turns) ---------- */
+      .chat { padding: 14px 14px 6px; display: flex; flex-direction: column; }
+      .turn { margin-bottom: 4px; }
+      .day-chip {
+        align-self: center; margin: 10px 0 12px; padding: 2px 12px;
+        border-radius: 999px; font-size: 11px; color: var(--text-faint);
+        background: var(--bg); border: 1px solid var(--hairline);
+        animation: popIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
+      }
+      .msg {
+        display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px;
+        max-width: 86%;
+        animation: fadeSlideRight 0.32s cubic-bezier(0.22, 0.8, 0.36, 1) backwards;
+      }
+      .msg.me { align-self: flex-end; flex-direction: row-reverse; animation-name: fadeSlideLeft; }
+      .msg .avatar {
+        width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 12px; font-weight: 600; color: #fff; user-select: none;
+      }
+      .msg.me .avatar { background: linear-gradient(135deg, var(--accent), var(--violet)); }
+      .msg.bot .avatar { background: linear-gradient(135deg, #0d9488, #14b8a6); }
+      .msg.bot .avatar svg, .msg.me .avatar svg { width: 15px; height: 15px; }
+      .msg-main { min-width: 0; display: flex; flex-direction: column; }
+      .msg.me .msg-main { align-items: flex-end; }
+      .msg-head {
+        display: flex; align-items: center; gap: 7px; margin: 0 4px 3px;
+        font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums;
+      }
+      .msg-head .speaker { font-weight: 600; color: var(--text-dim); }
+      .msg-head .del {
+        border: none; background: transparent; padding: 2px; cursor: pointer;
+        color: var(--text-faint); border-radius: 5px; opacity: 0;
+        transition: opacity 0.15s, color 0.15s, transform 0.15s;
+        display: inline-flex;
+      }
+      .msg-head .del:hover { color: var(--danger); transform: scale(1.15); }
+      .turn:hover .msg-head .del { opacity: 1; }
+      .bubble {
+        position: relative; padding: 8px 12px; border-radius: 13px;
+        font-size: 13.5px; line-height: 1.55; word-break: break-word; white-space: pre-wrap;
+        box-shadow: var(--shadow); transition: transform 0.15s, box-shadow 0.15s;
+        animation: bubbleIn 0.28s cubic-bezier(0.22, 0.8, 0.36, 1) backwards;
+      }
+      @keyframes bubbleIn {
+        from { opacity: 0; transform: scale(0.95) translateY(6px); }
+        to { opacity: 1; transform: scale(1) translateY(0); }
+      }
+      .msg.bot .bubble, .msg.other .bubble { background: var(--surface-hover); border-top-left-radius: 4px; }
+      .msg.me .bubble { background: var(--accent); color: #fff; border-top-right-radius: 4px; }
+      .msg:hover .bubble { transform: translateY(-1px); box-shadow: var(--shadow-lift); }
+      .bubble .pending-pill {
+        display: inline-flex; align-items: center; gap: 4px;
+        margin-left: 8px; padding: 0 6px; border-radius: 999px;
+        font-size: 10.5px; line-height: 16px; vertical-align: 1px;
+        color: var(--amber); background: var(--amber-soft);
+        animation: breathe 1.8s ease-in-out infinite;
+      }
+      .bubble .pending-pill::before {
+        content: ""; width: 5px; height: 5px; border-radius: 50%;
+        background: var(--amber); animation: breathe 1.8s ease-in-out infinite;
+      }
+      .bubble code, .bubble .placeholder-chip {
+        background: rgba(0, 0, 0, 0.06); padding: 1px 5px; border-radius: 4px; font-size: 12px;
+      }
+      html[data-theme="dark"] .bubble code, html[data-theme="dark"] .bubble .placeholder-chip {
+        background: rgba(255, 255, 255, 0.09);
+      }
+      .msg.me .bubble code, .msg.me .bubble .placeholder-chip { background: rgba(255, 255, 255, 0.2); }
+      .turn-divider { height: 1px; background: var(--hairline); margin: 2px 12px 12px; opacity: 0.6; }
+
+      .badge {
+        flex-shrink: 0; margin-top: 2px; padding: 1px 8px;
+        border-radius: 5px; font-size: 11.5px; font-weight: 500; line-height: 18px;
+      }
+      .badge.t-pending { color: var(--amber); background: var(--amber-soft); border: none; padding: 0 6px; }
+
+      .btn {
+        display: inline-flex; align-items: center; gap: 6px;
+        height: 32px; padding: 0 12px; border-radius: 8px;
+        border: 1px solid var(--border); background: var(--surface);
+        color: var(--text-dim); font-size: 12.5px; cursor: pointer;
+        transition: all 0.15s;
+      }
+      .btn:hover { color: var(--text); border-color: var(--text-faint); transform: translateY(-1px); box-shadow: var(--shadow); }
+      .btn:active { transform: scale(0.96); }
+      .btn.danger:hover { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+      .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      .btn.primary:hover { opacity: 0.92; color: #fff; box-shadow: 0 4px 14px var(--accent-soft); }
+      .btn:disabled { opacity: 0.4; cursor: default; transform: none; box-shadow: none; }
+
+      /* ---------- forms (config) ---------- */
+      .form-section { padding: 16px 20px; border-bottom: 1px solid var(--hairline); animation: fadeSlideUp 0.32s cubic-bezier(0.22, 0.8, 0.36, 1) backwards; }
+      .form-title {
+        display: flex; align-items: center; gap: 7px;
+        font-size: 13px; font-weight: 600; margin-bottom: 2px;
+      }
+      .form-title svg { width: 14px; height: 14px; color: var(--accent); }
+      .form-sub { font-size: 12px; color: var(--text-faint); margin: 0 0 10px; }
+      .form-sub code {
+        background: var(--surface-hover); padding: 1px 5px; border-radius: 4px; font-size: 11px;
+      }
+      .form-section-sub {
+        font-size: 11px; font-weight: 600; letter-spacing: 0.05em;
+        color: var(--text-faint); text-transform: uppercase; margin: 14px 0 4px;
+      }
+      .form-section-sub:first-child { margin-top: 0; }
+      .field {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 16px; padding: 9px 0; border-bottom: 1px dashed var(--hairline);
+        transition: background 0.15s; border-radius: 6px;
+      }
+      .field:hover { background: var(--surface-hover); }
+      .field:last-child { border-bottom: none; }
+      .field .f-label { font-size: 13px; }
+      .field .f-hint { font-size: 11.5px; color: var(--text-faint); margin-top: 1px; }
+      .field .f-control { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+      input[type="text"], input[type="number"], select.f-input {
+        background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+        color: var(--text); font-size: 12.5px; padding: 6px 9px; outline: none;
+        width: 150px; transition: border-color 0.15s, box-shadow 0.15s;
+      }
+      input:focus, select.f-input:focus { border-color: var(--accent-border); box-shadow: 0 0 0 3px var(--accent-soft); }
+      input::placeholder { color: var(--text-faint); }
+      .switch { position: relative; display: inline-block; width: 32px; height: 19px; cursor: pointer; vertical-align: middle; }
+      .switch input { display: none; }
+      .slider {
+        position: absolute; inset: 0; border-radius: 16px;
+        background: var(--border); transition: 0.18s;
+      }
+      .slider::before {
+        content: ""; position: absolute; width: 15px; height: 15px; border-radius: 50%;
+        background: #fff; top: 2px; left: 2px; transition: 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+      }
+      .switch input:checked + .slider { background: var(--accent); }
+      .switch input:checked + .slider::before { transform: translateX(13px); }
+      .switch:active .slider::before { width: 17px; }
+      .form-actions { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 16px; }
+
+      /* ---------- consent table ---------- */
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th {
+        text-align: left; padding: 9px 16px; font-size: 12px; font-weight: 500;
+        color: var(--text-faint); border-bottom: 1px solid var(--hairline);
+      }
+      td { padding: 10px 16px; border-bottom: 1px solid var(--hairline); transition: background 0.15s; }
+      tr:hover td { background: var(--surface-hover); }
+      tr:last-child td { border-bottom: none; }
+
+      /* ---------- empty / skeleton / error ---------- */
+      .empty {
+        flex: 1; display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        padding: 48px 24px; text-align: center; color: var(--text-faint);
+        animation: fadeSlideUp 0.35s cubic-bezier(0.22, 0.8, 0.36, 1);
+      }
+      .empty-icon {
+        width: 58px; height: 58px; border-radius: 16px;
+        display: flex; align-items: center; justify-content: center;
+        background: var(--accent-soft); color: var(--accent);
+        border: 1px solid var(--accent-border); margin-bottom: 14px;
+        animation: float 3.2s ease-in-out infinite;
+      }
+      .empty-icon svg { width: 25px; height: 25px; stroke-width: 1.5; }
+      .empty h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; color: var(--text); }
+      .empty p { margin: 0 0 18px; font-size: 12.5px; }
+      .empty-steps { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: center; }
+      .empty-steps .step {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 5px 12px; border-radius: 999px;
+        background: var(--bg); border: 1px solid var(--border);
+        font-size: 12px; color: var(--text-dim);
+        transition: all 0.15s;
+      }
+      .empty-steps .step:hover { transform: translateY(-2px); border-color: var(--accent-border); color: var(--text); }
+      .empty-steps .step svg { width: 13px; height: 13px; color: var(--accent); }
+      .empty-steps > svg { width: 13px; height: 13px; color: var(--text-faint); }
+
+      .error-panel {
+        flex: 1; display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        padding: 42px 24px; text-align: center;
+        animation: fadeSlideUp 0.3s cubic-bezier(0.22, 0.8, 0.36, 1);
+      }
+      .error-panel .empty-icon { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); animation: none; }
+      .error-panel h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; color: var(--text); }
+      .error-panel .err-msg {
+        margin: 0 0 16px; font-size: 12.5px; color: var(--text-faint);
+        max-width: 420px; word-break: break-all;
+      }
+
+      .skeleton { padding: 6px 10px; }
+      .skeleton .item-row {
+        height: 52px; border-radius: 8px; margin-bottom: 8px;
+        background: linear-gradient(90deg, var(--surface-hover) 25%, var(--hairline) 50%, var(--surface-hover) 75%);
+        background-size: 200% 100%; animation: shimmer 1.4s infinite;
+      }
+      @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+      /* ---------- pager / toast ---------- */
+      .pager {
+        display: flex; gap: 12px; align-items: center; justify-content: center;
+        padding: 9px; border-top: 1px solid var(--hairline);
+        font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums;
+      }
+      .toast {
+        position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%) translateY(14px) scale(0.95);
+        background: var(--text); color: var(--bg);
+        padding: 8px 18px; border-radius: 10px; font-size: 12.5px;
+        opacity: 0; transition: 0.25s cubic-bezier(0.34, 1.3, 0.64, 1); pointer-events: none; z-index: 50;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+        display: flex; align-items: center; gap: 7px;
+      }
+      .toast svg { width: 14px; height: 14px; }
+      .toast.ok svg { color: var(--ok); }
+      .toast.err { background: var(--danger); color: #fff; }
+      .toast.show { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+
+      @media (max-width: 900px) {
+        :root { --sidebar-w: 200px; }
+        body { padding: 16px; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="fx"></canvas>
+    <div class="page">
+      <header class="page-head">
+        <div class="title-wrap">
+          <i data-lucide="brain-circuit" class="brand-icon"></i>
+          <div>
+            <h1>记忆管理</h1>
+            <p class="sub">捕获 → 巩固 → 遗忘 → 召回；每个会话可独立调整策略</p>
+          </div>
+        </div>
+        <div class="head-actions">
+          <button class="icon-btn" id="refresh" title="刷新"><i data-lucide="refresh-cw"></i></button>
+        </div>
+      </header>
+
+      <section class="stats" id="cards"></section>
+
+      <div class="split">
+        <aside class="sidebar">
+          <div class="sidebar-search">
+            <div class="search-wrap">
+              <i data-lucide="search"></i>
+              <input type="text" id="scope-filter" placeholder="搜索会话" />
+            </div>
+          </div>
+          <div class="scope-list" id="scope-list"></div>
+        </aside>
+
+        <section class="detail">
+          <div class="detail-head" id="detail-head"></div>
+          <div class="tabs" id="tabs">
+            <button class="tab active" data-tab="memories"><i data-lucide="brain"></i>记忆</button>
+            <button class="tab" data-tab="raw"><i data-lucide="messages-square"></i>原文对话</button>
+            <button class="tab" data-tab="settings"><i data-lucide="settings-2"></i>会话配置</button>
+            <div class="spacer"></div>
+            <div class="search-wrap tab-search" id="search-wrap">
+              <i data-lucide="search"></i>
+              <input type="text" id="search" placeholder="搜索当前会话记忆" />
+            </div>
+          </div>
+          <div class="content" id="content"></div>
+          <div class="pager" id="pager" style="display: none">
+            <button class="icon-btn" id="prev"><i data-lucide="chevron-left"></i></button>
+            <span id="page-info"></span>
+            <button class="icon-btn" id="next"><i data-lucide="chevron-right"></i></button>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script type="module">
+      const bridge = window.AstrBotPluginPage;
+      const $ = (id) => document.getElementById(id);
+
+      const TYPE_NAMES = { semantic: "认知", insight: "洞察", raw: "对话", episodic: "往事" };
+      const state = {
+        scopes: [],
+        scope: null,
+        tab: "memories",
+        page: 1,
+        pageSize: 20,
+        q: "",
+        scopeFilter: "",
+        globalConfig: {},
+        providers: [],
+        scopeOverride: {},
+      };
+
+      /* ---------- utils ---------- */
+      const esc = (s) =>
+        String(s ?? "").replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+        })[c]);
+
+      const refreshIcons = () => window.lucide && window.lucide.createIcons();
+
+      const REDUCED_MOTION = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+
+      let toastTimer = null;
+      function toast(msg, kind = "ok") {
+        const el = $("toast");
+        el.className = `toast show ${kind}`;
+        el.innerHTML = `<i data-lucide="${kind === "err" ? "circle-alert" : "circle-check"}"></i>${esc(msg)}`;
+        refreshIcons();
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => el.classList.remove("show"), kind === "err" ? 3600 : 2200);
+      }
+
+      /* ---------- error handling ---------- */
+      // 统一 API 错误包装：失败时 toast + console，返回 null 交由调用方渲染错误面板
+      async function safe(label, fn, { silent = false } = {}) {
+        try {
+          return await fn();
+        } catch (err) {
+          const msg = err?.message || String(err);
+          console.error(`[Memoir] ${label}:`, err);
+          if (!silent) toast(`${label}失败：${msg}`, "err");
+          return null;
+        }
+      }
+
+      const errorPanel = (label, msg, retryKey) => `
+        <div class="error-panel">
+          <div class="empty-icon"><i data-lucide="triangle-alert"></i></div>
+          <h3>${esc(label)}失败</h3>
+          <p class="err-msg">${esc(msg)}</p>
+          <button class="btn" data-retry="${esc(retryKey)}"><i data-lucide="rotate-cw"></i>重试</button>
+        </div>`;
+
+      const RETRY_LOADERS = {};
+      window.addEventListener("unhandledrejection", (e) => {
+        console.error("[Memoir] unhandled:", e.reason);
+        toast(`出错了：${e.reason?.message || e.reason}`, "err");
+      });
+      window.addEventListener("error", (e) => {
+        console.error("[Memoir] runtime error:", e.error || e.message);
+      });
+
+      function fmtTime(ts) {
+        if (!ts) return "-";
+        const d = new Date(ts * 1000);
+        const p = (n) => String(n).padStart(2, "0");
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+      }
+
+      function timeAgo(ts) {
+        if (!ts) return "-";
+        const s = Math.floor(Date.now() / 1000 - ts);
+        if (s < 60) return "刚刚";
+        if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+        if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+        if (s < 86400 * 30) return `${Math.floor(s / 86400)} 天前`;
+        return fmtTime(ts).slice(0, 10);
+      }
+
+      function dayLabel(ts) {
+        const d = new Date(ts * 1000);
+        const now = new Date();
+        const sameYear = d.getFullYear() === now.getFullYear();
+        const m = d.getMonth() + 1;
+        if (d.toDateString() === now.toDateString()) return "今天";
+        const yest = new Date(now);
+        yest.setDate(now.getDate() - 1);
+        if (d.toDateString() === yest.toDateString()) return "昨天";
+        return sameYear ? `${m}月${d.getDate()}日` : `${d.getFullYear()}年${m}月${d.getDate()}日`;
+      }
+
+      const emptyState = (icon, msg) =>
+        `<div class="empty"><div class="empty-icon"><i data-lucide="${icon}"></i></div><p>${msg}</p></div>`;
+
+      const skeleton = (n = 5) =>
+        `<div class="skeleton">${Array.from({ length: n }, () => '<div class="item-row"></div>').join("")}</div>`;
+
+      const stagger = (i, base = 0, step = 30, cap = 300) =>
+        REDUCED_MOTION ? "" : ` style="animation-delay:${Math.min(base + i * step, cap)}ms"`;
+
+      /* ---------- particles ---------- */
+      function initParticles() {
+        const cv = $("fx");
+        if (REDUCED_MOTION) {
+          cv.remove();
+          return;
+        }
+        const ctx = cv.getContext("2d");
+        let W = 0, H = 0, dpr = 1, raf = 0, running = false;
+        const N = 42;
+        const P = [];
+        const mouse = { x: -9999, y: -9999 };
+        // 主题色从 CSS 变量读取，主题切换时刷新
+        let palette = [];
+        const readPalette = () => {
+          const cs = getComputedStyle(document.documentElement);
+          const pick = (v, fb) => {
+            const raw = cs.getPropertyValue(v).trim();
+            return raw || fb;
+          };
+          // 颜色以 rgba 形式输出需转换；直接用固定低透明度白色/主题色叠加
+          const dark = document.documentElement.dataset.theme === "dark";
+          palette = dark
+            ? ["124,129,242", "167,139,250", "236,236,238"]
+            : ["94,106,210", "139,92,246", "13,148,136"];
+        };
+
+        function resize() {
+          dpr = window.devicePixelRatio || 1;
+          W = cv.width = Math.floor(innerWidth * dpr);
+          H = cv.height = Math.floor(innerHeight * dpr);
+          cv.style.width = innerWidth + "px";
+          cv.style.height = innerHeight + "px";
+        }
+
+        function spawn(p) {
+          p.x = Math.random() * W;
+          p.y = Math.random() * H;
+          p.r = (0.9 + Math.random() * 1.6) * dpr;
+          p.vx = (Math.random() - 0.5) * 0.12 * dpr;
+          p.vy = (-0.06 - Math.random() * 0.16) * dpr;
+          p.phase = Math.random() * Math.PI * 2;
+          p.tw = 0.4 + Math.random() * 0.8;
+          p.c = palette[Math.floor(Math.random() * palette.length)];
+        }
+
+        function frame(t) {
+          if (!running) return;
+          ctx.clearRect(0, 0, W, H);
+          const link = 110 * dpr;
+          for (const p of P) {
+            p.x += p.vx + Math.sin(t / 4000 + p.phase) * 0.05 * dpr;
+            p.y += p.vy;
+            // 鼠标轻微排斥，增加"响应"感
+            const dx = p.x - mouse.x * dpr, dy = p.y - mouse.y * dpr;
+            const d2 = dx * dx + dy * dy;
+            const rr = 90 * dpr;
+            if (d2 < rr * rr && d2 > 1) {
+              const d = Math.sqrt(d2);
+              const f = ((rr - d) / rr) * 0.35 * dpr;
+              p.x += (dx / d) * f;
+              p.y += (dy / d) * f;
+            }
+            if (p.y < -10) { p.y = H + 10; p.x = Math.random() * W; }
+            if (p.x < -10) p.x = W + 10;
+            if (p.x > W + 10) p.x = -10;
+          }
+          // 连线
+          ctx.lineWidth = dpr * 0.6;
+          for (let i = 0; i < N; i++) {
+            for (let j = i + 1; j < N; j++) {
+              const a = P[i], b = P[j];
+              const dx = a.x - b.x, dy = a.y - b.y;
+              const d = Math.hypot(dx, dy);
+              if (d < link) {
+                const alpha = (1 - d / link) * 0.08;
+                ctx.strokeStyle = `rgba(${a.c},${alpha})`;
+                ctx.beginPath();
+                ctx.moveTo(a.x, a.y);
+                ctx.lineTo(b.x, b.y);
+                ctx.stroke();
+              }
+            }
+          }
+          // 粒子本体（呼吸闪烁）
+          for (const p of P) {
+            const tw = 0.35 + 0.3 * Math.sin(t / 900 * p.tw + p.phase);
+            ctx.fillStyle = `rgba(${p.c},${tw})`;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          raf = requestAnimationFrame(frame);
+        }
+
+        const start = () => {
+          if (running || REDUCED_MOTION) return;
+          running = true;
+          raf = requestAnimationFrame(frame);
+        };
+        const stop = () => {
+          running = false;
+          cancelAnimationFrame(raf);
+        };
+
+        readPalette();
+        resize();
+        for (let i = 0; i < N; i++) {
+          const p = {};
+          spawn(p);
+          // 初始相位随机化呼吸
+          P.push(p);
+        }
+        window.addEventListener("resize", resize);
+        window.addEventListener("pointermove", (e) => { mouse.x = e.clientX; mouse.y = e.clientY; });
+        window.addEventListener("pointerleave", () => { mouse.x = -9999; mouse.y = -9999; });
+        document.addEventListener("visibilitychange", () => (document.hidden ? stop() : start()));
+        // 主题切换时刷新调色板并重染色
+        window.__fxRecolor = () => {
+          readPalette();
+          for (const p of P) p.c = palette[Math.floor(Math.random() * palette.length)];
+        };
+        start();
+      }
+
+      /* ---------- stats & sidebar ---------- */
+      function countUp(el, target, dur = 550) {
+        if (REDUCED_MOTION || target === 0) {
+          el.textContent = target;
+          return;
+        }
+        const start = performance.now();
+        const tick = (t) => {
+          const k = Math.min(1, (t - start) / dur);
+          const eased = 1 - Math.pow(1 - k, 3);
+          el.textContent = Math.round(target * eased);
+          if (k < 1) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      }
+
+      function renderOverview(totals) {
+        const items = [
+          ["c-scope", "layers", "会话", totals.scopes],
+          ["c-memory", "brain", "结构化记忆", totals.memories],
+          ["c-raw", "messages-square", "原文轮次", totals.raw_turns],
+          ["c-pending", "clock-3", "待巩固", totals.pending],
+        ];
+        $("cards").innerHTML = items
+          .map(
+            ([cls, icon, label, num], i) =>
+              `<div class="stat ${cls}"${stagger(i, 0, 60)}><div class="chip"><i data-lucide="${icon}"></i></div><div><div class="num" data-count="${num}">0</div><div class="label">${label}</div></div></div>`,
+          )
+          .join("");
+        $("cards").querySelectorAll(".num").forEach((el) => countUp(el, Number(el.dataset.count) || 0));
+        refreshIcons();
+      }
+
+      function scopeName(s) {
+        return `${s.scope_type === "private" ? "私聊" : "群聊"} · ${s.scope_key.split(":").slice(1).join(":")}`;
+      }
+
+      function renderSidebar() {
+        const kw = state.scopeFilter.trim().toLowerCase();
+        const filtered = state.scopes.filter(
+          (s) => !kw || s.scope_key.toLowerCase().includes(kw) || s.scope_type.includes(kw),
+        );
+        if (!filtered.length) {
+          $("scope-list").innerHTML = emptyState(
+            state.scopes.length ? "search-x" : "inbox",
+            state.scopes.length ? "没有匹配的会话" : "与机器人对话后，会话会出现在这里",
+          );
+          refreshIcons();
+          return;
+        }
+        const groups = [
+          ["private", "user-round", "私聊"],
+          ["group", "users-round", "群聊"],
+        ];
+        let html = "";
+        let i = 0;
+        for (const [type, icon, label] of groups) {
+          const list = filtered.filter((s) => s.scope_type === type);
+          if (!list.length) continue;
+          html += `<div class="group-title"><i data-lucide="${icon}"></i>${label}<span class="count">${list.length}</span></div>`;
+          for (const s of list) {
+            const active = state.scope && state.scope.scope_key === s.scope_key;
+            html += `
+              <button class="scope-item ${active ? "active" : ""}" data-scope="${esc(s.scope_type)}|${esc(s.scope_key)}"${stagger(i, 40)}>
+                <span class="chip"><i data-lucide="${icon}"></i></span>
+                <span class="info">
+                  <span class="name">${esc(scopeName(s))}${s.memory_count === 0 ? '<span class="disabled-tag">空</span>' : ""}</span>
+                  <span class="meta">${s.memory_count} 记忆 · ${timeAgo(s.last_activity_at)}${s.pending_count ? ` · <span class="pending">${s.pending_count} 待巩固</span>` : ""}</span>
+                </span>
+                ${s.pending_count ? '<span class="badge-dot"></span>' : ""}
+              </button>`;
+            i++;
+          }
+        }
+        $("scope-list").innerHTML = html;
+        refreshIcons();
+      }
+
+      /* ---------- detail ---------- */
+      function renderDetailHead() {
+        const s = state.scopes.find(
+          (x) => state.scope && x.scope_key === state.scope.scope_key,
+        );
+        const hasOverride = Object.keys(state.scopeOverride).length > 0;
+        const disabled = state.scopeOverride.enabled === false;
+        $("detail-head").innerHTML = `
+          <span class="chip"><i data-lucide="${s?.scope_type === "group" ? "users-round" : "user-round"}"></i></span>
+          <div style="flex:1;min-width:0">
+            <div class="name">${esc(state.scope ? scopeName(state.scope) : "")}</div>
+            <div class="sub" style="font-size:11.5px;color:var(--text-dim)">${esc(state.scope?.scope_key || "")}</div>
+          </div>
+          ${disabled ? '<span class="status-badge off"><i data-lucide="circle-pause"></i>已禁用</span>' : ""}
+          ${hasOverride && !disabled ? '<span class="status-badge custom"><i data-lucide="sliders-horizontal"></i>自定义配置</span>' : ""}
+          <button class="btn danger" id="clear-scope"><i data-lucide="eraser"></i>清空会话</button>`;
+        refreshIcons();
+        $("clear-scope")?.addEventListener("click", clearScope);
+      }
+
+      function memoryItem(m, i) {
+        const type = TYPE_NAMES[m.memory_type] || m.memory_type;
+        return `<div class="item"${stagger(i)}>
+          <span class="badge t-${esc(m.memory_type)}">${type}</span>
+          <div class="item-body">
+            <div class="item-content">${esc(m.content)}</div>
+            <div class="item-meta">
+              <span>重要度 ${m.importance ?? "-"}</span>
+              <span>强度 ${(m.strength ?? 0).toFixed(2)}</span>
+              <span>${fmtTime(m.updated_at)}</span>
+              ${m.subject ? `<span class="who">${esc(m.subject)}</span>` : ""}
+              <span>#${m.id}</span>
+            </div>
+          </div>
+          <button class="icon-btn danger" data-del-memory="${m.id}" title="删除"><i data-lucide="trash-2"></i></button>
+        </div>`;
+      }
+
+      /* ---------- 原文对话：聊天气泡渲染 ---------- */
+      // 解析一轮原文为若干气泡：私聊存储格式为「用户: … / 助手: …」，桥接复制为「用户: …」
+      function parseTurn(content) {
+        const s = String(content);
+        let m = s.match(/^用户[:：]\s*([\s\S]*?)\s*\/\s*助手[:：]\s*([\s\S]+)$/);
+        if (m) {
+          return [
+            { who: "me", text: m[1] },
+            { who: "bot", text: m[2] },
+          ];
+        }
+        const u = s.match(/^用户[:：]\s*([\s\S]+)$/);
+        if (u) return [{ who: "me", text: u[1] }];
+        return [{ who: "other", text: s }];
+      }
+
+      function speakerHue(name) {
+        let h = 0;
+        for (const ch of String(name)) h = (h * 31 + ch.codePointAt(0)) % 360;
+        return h;
+      }
+
+      function bubbleText(text) {
+        // 占位符高亮（[图片] [语音x2] 等），其余转义
+        return esc(text).replace(
+          /\[(图片|语音|文件|视频|表情)(?:x(\d+))?\]/g,
+          (_, kind, n) => `<span class="placeholder-chip">[${kind}${n ? `x${n}` : ""}]</span>`,
+        );
+      }
+
+      function rawTurnHtml(r, prevDay, i) {
+        const day = new Date((r.created_at || 0) * 1000).toDateString();
+        const chip = day !== prevDay ? `<div class="day-chip"${stagger(i, 20)}>${esc(dayLabel(r.created_at || 0))}</div>` : "";
+        const pending = r.extracted
+          ? ""
+          : `<span class="pending-pill">待巩固</span>`;
+        const speaker = r.speaker_name
+          ? `<span class="speaker" style="color:hsl(${speakerHue(r.speaker_name)} 55% 55%)">${esc(r.speaker_name)}</span> ·`
+          : "";
+        const head = `<div class="msg-head">${speaker}<span>${fmtTime(r.created_at)}</span><span>#${r.id}</span>${pending}<button class="del" data-del-raw="${r.id}" title="删除这轮"><i data-lucide="trash-2"></i></button></div>`;
+        const parts = parseTurn(r.content);
+        const rows = parts
+          .map((p, k) => {
+            let avatar;
+            if (p.who === "bot") {
+              avatar = `<span class="avatar"><i data-lucide="bot"></i></span>`;
+            } else if (p.who === "me") {
+              avatar = `<span class="avatar"><i data-lucide="user-round"></i></span>`;
+            } else {
+              const name = r.speaker_name || "?";
+              avatar = `<span class="avatar" style="background:hsl(${speakerHue(name)} 50% 52%)">${esc(name.slice(0, 1))}</span>`;
+            }
+            // 每个角色独立成行；时间/删除等元信息只挂在首轮消息上
+            return `<div class="msg ${p.who}"${stagger(i, 20, 30, 260)}>${avatar}<div class="msg-main">${k === 0 ? head : ""}<div class="bubble">${bubbleText(p.text)}</div></div></div>`;
+          })
+          .join("");
+        return { chip, html: rows, day };
+      }
+
+      function renderRawTurns(items) {
+        let html = "";
+        let prevDay = "";
+        let i = 0;
+        for (const r of items) {
+          const { chip, html: msgHtml, day } = rawTurnHtml(r, prevDay, i);
+          html += chip + msgHtml;
+          prevDay = day;
+          i++;
+        }
+        return `<div class="chat">${html}</div>`;
+      }
+
+      function renderPager(total, pageSize) {
+        const pages = Math.max(1, Math.ceil(total / pageSize));
+        if (pages <= 1) {
+          $("pager").style.display = "none";
+          return;
+        }
+        $("pager").style.display = "flex";
+        $("page-info").textContent = `${state.page} / ${pages} · 共 ${total} 条`;
+        $("prev").disabled = state.page <= 1;
+        $("next").disabled = state.page >= pages;
+      }
+
+      async function loadMemories() {
+        $("content").innerHTML = skeleton();
+        const params = { scope_type: state.scope.scope_type, scope_key: state.scope.scope_key };
+        const res = await safe(
+          "加载记忆",
+          () =>
+            state.q
+              ? bridge.apiGet("memories", { ...params, q: state.q })
+              : bridge.apiGet("memories", { ...params, page: state.page, page_size: state.pageSize }),
+          { silent: true },
+        );
+        if (!res) {
+          $("content").innerHTML = errorPanel("加载记忆", "请求失败，请检查后端状态后重试", "memories");
+          refreshIcons();
+          return;
+        }
+        let html;
+        if (state.q) {
+          html = res.items.length
+            ? `<div class="list-pad">${res.items.map(memoryItem).join("")}</div>`
+            : emptyState("search-x", `没有找到与「${esc(state.q)}」相关的记忆`);
+          renderPager(0, state.pageSize);
+        } else {
+          html = res.items.length
+            ? `<div class="list-pad">${res.items.map(memoryItem).join("")}</div>`
+            : emptyState("inbox", "当前会话还没有结构化记忆");
+          renderPager(res.total, res.page_size || state.pageSize);
+        }
+        $("content").innerHTML = html;
+        refreshIcons();
+      }
+
+      async function loadRaw() {
+        $("content").innerHTML = skeleton();
+        const res = await safe(
+          "加载原文",
+          () =>
+            bridge.apiGet("raw", {
+              scope_type: state.scope.scope_type,
+              scope_key: state.scope.scope_key,
+              page: state.page,
+              page_size: state.pageSize,
+            }),
+          { silent: true },
+        );
+        if (!res) {
+          $("content").innerHTML = errorPanel("加载原文对话", "请求失败，请检查后端状态后重试", "raw");
+          refreshIcons();
+          return;
+        }
+        $("content").innerHTML = res.items.length
+          ? renderRawTurns(res.items)
+          : emptyState("messages-square", "当前会话还没有原文对话");
+        renderPager(res.total, res.page_size || state.pageSize);
+        refreshIcons();
+      }
+
+      /* ---------- config forms ---------- */
+      const GLOBAL_FIELDS = [
+        {
+          section: "基础",
+          items: [
+            { key: "enable_private_memory", label: "启用私聊记忆", type: "switch", hint: "关闭后所有私聊不进行记忆捕获与召回" },
+            { key: "enable_group_memory", label: "启用群聊记忆", type: "switch", hint: "关闭后所有群聊不进行记忆捕获与召回" },
+            { key: "background_llm_provider", label: "后台小模型", type: "provider", hint: "巩固/抽取使用的模型，留空则用当前对话模型" },
+          ],
+        },
+        {
+          section: "召回",
+          items: [
+            { key: "recall_top_k", label: "线索召回条数", type: "number", min: 1, max: 30 },
+            { key: "recall_core_top_k", label: "常驻记忆条数", type: "number", min: 0, max: 10, hint: "每次对话固定注入的稳定认知，0 关闭" },
+            { key: "recall_recent_turns", label: "群聊近因条数", type: "number", min: 0, max: 20, hint: "群聊召回时附带最近原文，0 关闭" },
+          ],
+        },
+        {
+          section: "巩固与遗忘",
+          items: [
+            { key: "consolidation_scan_interval_minutes", label: "扫描周期（分钟）", type: "number", min: 1, max: 1440 },
+            { key: "consolidation_count_threshold_private", label: "私聊触发阈值（轮）", type: "number", min: 1, max: 500 },
+            { key: "consolidation_count_threshold_group", label: "群聊触发阈值（条）", type: "number", min: 1, max: 1000 },
+            { key: "consolidation_idle_hours", label: "静默触发（小时）", type: "number", min: 1, max: 168 },
+            { key: "raw_retention_days", label: "原文保留天数", type: "number", min: 1, max: 365 },
+            { key: "decay_rate_semantic", label: "语义衰减系数", type: "float", hint: "每周期强度保留比例 0-1" },
+            { key: "decay_rate_insight", label: "洞察衰减系数", type: "float", hint: "洞察几乎不遗忘，接近 1" },
+          ],
+        },
+        {
+          section: "跨会话桥接",
+          items: [
+            { key: "enable_cross_scope_bridge", label: "启用桥接", type: "switch", hint: "群聊中的自我陈述写入用户私聊记忆（仍需用户授权）" },
+            { key: "bridge_max_sensitivity", label: "敏感度上限", type: "select", options: ["low", "medium", "high"], hint: "low 仅日常事实；medium 含一般隐私；high 不限制" },
+          ],
+        },
+      ];
+
+      const SCOPE_FIELDS = [
+        { key: "enabled", label: "启用本会话记忆", type: "inherit-switch", hint: "关闭后该会话不再捕获与召回" },
+        { key: "recall_top_k", label: "线索召回条数", type: "inherit-number" },
+        { key: "recall_core_top_k", label: "常驻记忆条数", type: "inherit-number" },
+        { key: "recall_recent_turns", label: "群聊近因条数", type: "inherit-number", groupOnly: true },
+        { key: "consolidation_count_threshold", label: "巩固触发阈值", type: "inherit-number", hint: "积攒多少轮原文后触发一次抽取" },
+        { key: "consolidation_idle_hours", label: "静默触发（小时）", type: "inherit-number" },
+        { key: "bridge_enabled", label: "允许自我陈述桥接", type: "inherit-switch", groupOnly: true, hint: "叠加在用户授权之上" },
+        { key: "bridge_max_sensitivity", label: "敏感度上限", type: "inherit-select", options: ["low", "medium", "high"], groupOnly: true },
+      ];
+
+      function fieldRow(f, value, inheritValue, inheritable) {
+        const hint = f.hint ? `<div class="f-hint">${esc(f.hint)}</div>` : "";
+        let control = "";
+        if (!inheritable) {
+          if (f.type === "switch") {
+            control = `<label class="switch"><input type="checkbox" data-cfg="${f.key}" ${value ? "checked" : ""} /><span class="slider"></span></label>`;
+          } else if (f.type === "select") {
+            const opts = (f.type === "provider" ? state.providers : f.options) || [];
+            control = `<select class="f-input" data-cfg="${f.key}">${
+              f.type === "provider" ? `<option value="">（使用当前对话模型）</option>` : ""
+            }${opts.map((o) => `<option value="${esc(o)}" ${value === o ? "selected" : ""}>${esc(f.type === "provider" ? o : { low: "low 仅日常事实", medium: "medium 含一般隐私", high: "high 不限制" }[o] || o)}</option>`).join("")}</select>`;
+          } else {
+            control = `<input type="number" class="f-input" data-cfg="${f.key}" value="${value ?? ""}" step="${f.type === "float" ? "0.01" : "1"}" min="${f.min ?? 0}" max="${f.max ?? 100000}" />`;
+          }
+        } else {
+          // 继承式控件：空值 = 跟随全局
+          if (f.type === "inherit-switch") {
+            const opts = [
+              ["", "跟随全局"],
+              ["true", "开启"],
+              ["false", "关闭"],
+            ];
+            const cur = value === undefined || value === null ? "" : String(value);
+            control = `<select class="f-input" data-cfg="${f.key}">${opts.map(([v, t]) => `<option value="${v}" ${cur === v ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>`;
+          } else if (f.type === "inherit-select") {
+            const opts = ["", ...f.options];
+            control = `<select class="f-input" data-cfg="${f.key}">${opts.map((o) => `<option value="${o}" ${value === o || (value === undefined && o === "") ? "selected" : ""}>${o === "" ? `跟随全局（当前：${esc(inheritValue)}）` : esc(o)}</option>`).join("")}</select>`;
+          } else {
+            control = `<input type="number" class="f-input" data-cfg="${f.key}" value="${value ?? ""}" placeholder="${inheritValue ?? "继承全局"}" />`;
+          }
+        }
+        return `<div class="field"><div style="flex:1;min-width:0"><div class="f-label">${esc(f.label)}</div>${hint}</div>${control}</div>`;
+      }
+
+      async function loadScopeConfigTab() {
+        $("content").innerHTML = skeleton(3);
+        const [cfgRes, gRes] = await Promise.all([
+          safe(
+            "加载会话配置",
+            () =>
+              bridge.apiGet("scope-config", {
+                scope_type: state.scope.scope_type,
+                scope_key: state.scope.scope_key,
+              }),
+            { silent: true },
+          ),
+          safe("加载全局配置", () => bridge.apiGet("config"), { silent: true }),
+        ]);
+        if (!cfgRes || !gRes) {
+          $("content").innerHTML = errorPanel("加载配置", "请求失败，请检查后端状态后重试", "settings");
+          refreshIcons();
+          return;
+        }
+        state.scopeOverride = cfgRes.override || {};
+        state.globalConfig = gRes.config || {};
+        state.providers = gRes.providers || [];
+        const ov = state.scopeOverride;
+        const g = state.globalConfig;
+        const isGroup = state.scope.scope_type === "group";
+        const fields = SCOPE_FIELDS.filter((f) => isGroup || !f.groupOnly);
+        const rows = fields
+          .map((f) => fieldRow(f, ov[f.key], g[f.key] ?? "", true))
+          .join("");
+        const globalRows = GLOBAL_FIELDS.map((gsec, si) => {
+          const gRows = gsec.items.map((f) => fieldRow(f, g[f.key], null, false)).join("");
+          return `<div class="form-section-sub"${stagger(si, 0)}>${esc(gsec.section)}</div>${gRows}`;
+        }).join("");
+        $("content").innerHTML = `
+          <div class="form-section">
+            <div class="form-title"><i data-lucide="sliders-horizontal"></i>会话覆盖配置</div>
+            <p class="form-sub">仅对此会话生效；留空/「跟随全局」表示使用下方全局默认值</p>
+            ${rows}
+            <div class="form-actions">
+              <button class="btn" id="reset-scope-cfg"><i data-lucide="rotate-ccw"></i>恢复继承</button>
+              <button class="btn primary" id="save-scope-cfg"><i data-lucide="check"></i>保存覆盖</button>
+            </div>
+          </div>
+          <div class="form-section">
+            <div class="form-title"><i data-lucide="globe"></i>全局默认配置</div>
+            <p class="form-sub">对所有未单独配置的会话生效</p>
+            ${globalRows}
+            <div class="form-actions">
+              <button class="btn primary" id="save-global-cfg"><i data-lucide="check"></i>保存全局配置</button>
+            </div>
+          </div>
+          <div class="form-section">
+            <div class="form-title"><i data-lucide="shield-check"></i>桥接授权记录</div>
+            <p class="form-sub">用户通过聊天指令 <code>/memoir consent on</code> 授权后出现在这里</p>
+            <div id="consent-box">${skeleton(2)}</div>
+          </div>`;
+        refreshIcons();
+        loadConsents();
+        $("save-scope-cfg").addEventListener("click", saveScopeConfig);
+        $("reset-scope-cfg").addEventListener("click", resetScopeConfig);
+        $("save-global-cfg").addEventListener("click", saveGlobalConfig);
+      }
+
+      function collectScopeOverride() {
+        const override = {};
+        for (const f of SCOPE_FIELDS) {
+          const el = document.querySelector(`[data-cfg="${f.key}"]`);
+          if (!el) continue;
+          if (f.type === "inherit-switch") {
+            if (el.value !== "") override[f.key] = el.value === "true";
+          } else if (f.type === "inherit-select") {
+            if (el.value !== "") override[f.key] = el.value;
+          } else if (f.type === "inherit-number") {
+            if (el.value !== "") override[f.key] = Number(el.value);
+          }
+        }
+        return override;
+      }
+
+      async function saveScopeConfig() {
+        const override = collectScopeOverride();
+        const res = await safe("保存会话配置", () =>
+          bridge.apiPost("scope-config/update", { ...state.scope, override }),
+        );
+        if (res === null) return;
+        state.scopeOverride = override;
+        toast(override && Object.keys(override).length ? "会话配置已保存" : "已恢复继承全局");
+        renderDetailHead();
+      }
+
+      async function resetScopeConfig() {
+        const res = await safe("恢复配置", () =>
+          bridge.apiPost("scope-config/update", { ...state.scope, override: {} }),
+        );
+        if (res === null) return;
+        state.scopeOverride = {};
+        toast("已恢复继承全局配置");
+        renderDetailHead();
+        loadScopeConfigTab();
+      }
+
+      function collectGlobalConfig() {
+        const payload = {};
+        for (const sec of GLOBAL_FIELDS) {
+          for (const f of sec.items) {
+            const el = document.querySelector(`[data-cfg="${f.key}"]`);
+            if (!el) continue;
+            if (f.type === "switch") payload[f.key] = el.checked;
+            else if (f.type === "number" || f.type === "float") payload[f.key] = Number(el.value);
+            else payload[f.key] = el.value;
+          }
+        }
+        return payload;
+      }
+
+      async function saveGlobalConfig() {
+        const payload = collectGlobalConfig();
+        const res = await safe("保存全局配置", () => bridge.apiPost("config/update", payload));
+        if (res === null) return;
+        toast(`已保存 ${res.updated?.length ?? 0} 项全局配置`);
+      }
+
+      async function loadConsents() {
+        const box = $("consent-box");
+        if (!box) return;
+        const res = await safe("加载授权记录", () => bridge.apiGet("consents"), { silent: true });
+        if (!res) {
+          box.innerHTML = errorPanel("加载授权记录", "请求失败", "consents");
+          refreshIcons();
+          return;
+        }
+        const items = res.items || [];
+        box.innerHTML = items.length
+          ? `<table>
+              <tr><th>平台</th><th>用户</th><th style="width:80px">授权</th><th>更新时间</th></tr>
+              ${items
+                .map(
+                  (c) => `<tr>
+                    <td>${esc(c.platform)}</td>
+                    <td>${esc(c.sender_id)}</td>
+                    <td><label class="switch"><input type="checkbox" data-consent="${esc(c.platform)}|${esc(c.sender_id)}" ${c.enabled ? "checked" : ""} /><span class="slider"></span></label></td>
+                    <td style="color:var(--text-faint)">${timeAgo(c.updated_at)}</td>
+                  </tr>`,
+                )
+                .join("")}
+            </table>`
+          : `<p style="color:var(--text-faint);font-size:12.5px;margin:0">暂无授权记录</p>`;
+        refreshIcons();
+      }
+      RETRY_LOADERS.consents = () => loadConsents();
+
+      /* ---------- tabs & events ---------- */
+      async function loadTab() {
+        $("search-wrap").style.display = state.tab === "memories" ? "flex" : "none";
+        if (!state.scope) {
+          $("pager").style.display = "none";
+          $("detail-head").innerHTML = "";
+          $("content").innerHTML = renderNoScope();
+          refreshIcons();
+          return;
+        }
+        renderDetailHead();
+        if (state.tab === "memories") await loadMemories();
+        else if (state.tab === "raw") await loadRaw();
+        else await loadScopeConfigTab();
+      }
+
+      function renderNoScope() {
+        return `
+          <div class="empty">
+            <div class="empty-icon"><i data-lucide="inbox"></i></div>
+            <h3>还没有任何记忆</h3>
+            <p>与机器人对话后，会话会自动出现在这里</p>
+            <div class="empty-steps">
+              <span class="step"><i data-lucide="message-circle"></i>正常聊天</span>
+              <i data-lucide="arrow-right"></i>
+              <span class="step"><i data-lucide="sparkles"></i>后台自动巩固</span>
+              <i data-lucide="arrow-right"></i>
+              <span class="step"><i data-lucide="database"></i>在此管理</span>
+            </div>
+          </div>`;
+      }
+
+      async function clearScope() {
+        if (!state.scope) return;
+        if (!confirm(`确定清空会话 ${state.scope.scope_key} 的全部记忆与原文？此操作不可恢复。`)) return;
+        const res = await safe("清空会话", () => bridge.apiPost("scope/clear", state.scope));
+        if (res === null) return;
+        toast(`已清空 ${res.deleted ?? 0} 条记录`);
+        await refreshAll();
+      }
+
+      async function refreshAll(spin = false) {
+        $("refresh").classList.toggle("spinning", spin);
+        const overview = await safe("刷新概览", () => bridge.apiGet("overview"), { silent: true });
+        $("refresh").classList.remove("spinning");
+        if (!overview) {
+          toast("刷新失败：无法连接记忆服务", "err");
+          return false;
+        }
+        renderOverview(overview.totals);
+        state.scopes = overview.scopes || [];
+        if (state.scope) {
+          const cur = state.scopes.find((s) => s.scope_key === state.scope.scope_key);
+          if (!cur) state.scope = state.scopes[0] || null;
+        } else {
+          state.scope = state.scopes[0] || null;
+        }
+        renderSidebar();
+        await loadTab();
+        return true;
+      }
+
+      function bindEvents() {
+        $("tabs").addEventListener("click", (e) => {
+          const tab = e.target.closest(".tab");
+          if (!tab) return;
+          document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
+          state.tab = tab.dataset.tab;
+          state.page = 1;
+          loadTab();
+        });
+
+        $("scope-list").addEventListener("click", (e) => {
+          const item = e.target.closest("[data-scope]");
+          if (!item) return;
+          const [scope_type, scope_key] = item.dataset.scope.split("|");
+          state.scope = { scope_type, scope_key };
+          state.page = 1;
+          renderSidebar();
+          loadTab();
+        });
+
+        $("scope-filter").addEventListener("input", (e) => {
+          state.scopeFilter = e.target.value;
+          renderSidebar();
+        });
+
+        $("search").addEventListener("input", (e) => {
+          clearTimeout(state.searchTimer);
+          state.searchTimer = setTimeout(() => {
+            state.q = e.target.value.trim();
+            state.page = 1;
+            if (state.scope && state.tab === "memories") loadMemories();
+          }, 300);
+        });
+
+        $("prev").addEventListener("click", () => {
+          if (state.page > 1) { state.page--; loadTab(); }
+        });
+        $("next").addEventListener("click", () => {
+          state.page++; loadTab();
+        });
+
+        $("content").addEventListener("click", async (e) => {
+          const retry = e.target.closest("[data-retry]");
+          if (retry) {
+            const fn = RETRY_LOADERS[retry.dataset.retry];
+            if (fn) fn();
+            return;
+          }
+          const delMemory = e.target.closest("[data-del-memory]");
+          const delRaw = e.target.closest("[data-del-raw]");
+          if (delMemory && confirm("确定删除这条记忆？")) {
+            const ok = await safe("删除记忆", () =>
+              bridge.apiPost("memories/delete", { id: Number(delMemory.dataset.delMemory), ...state.scope }),
+            );
+            if (ok !== null) {
+              toast("已删除");
+              loadTab();
+            }
+          } else if (delRaw && confirm("确定删除这轮对话？")) {
+            const ok = await safe("删除原文", () =>
+              bridge.apiPost("raw/delete", { id: Number(delRaw.dataset.delRaw), ...state.scope }),
+            );
+            if (ok !== null) {
+              toast("已删除");
+              loadTab();
+            }
+          }
+        });
+
+        $("content").addEventListener("change", async (e) => {
+          const input = e.target.closest("[data-consent]");
+          if (!input) return;
+          const [platform, sender_id] = input.dataset.consent.split("|");
+          const ok = await safe("更新授权", () =>
+            bridge.apiPost("consents/toggle", { platform, sender_id, enabled: input.checked }),
+          );
+          if (ok !== null) toast(input.checked ? "已开启授权" : "已关闭授权");
+          else input.checked = !input.checked;
+        });
+
+        $("refresh").addEventListener("click", () => refreshAll(true));
+      }
+
+      async function main() {
+        initParticles();
+        const ctx = await bridge.ready();
+        if (typeof ctx?.isDark === "boolean") {
+          document.documentElement.setAttribute("data-theme", ctx.isDark ? "dark" : "light");
+        }
+        bridge.onContext((c) => {
+          if (typeof c?.isDark === "boolean") {
+            document.documentElement.setAttribute("data-theme", c.isDark ? "dark" : "light");
+            window.__fxRecolor?.();
+          }
+        });
+
+        bindEvents();
+        await refreshAll();
+      }
+
+      RETRY_LOADERS.memories = () => loadMemories();
+      RETRY_LOADERS.raw = () => loadRaw();
+      RETRY_LOADERS.settings = () => loadScopeConfigTab();
+      RETRY_LOADERS.overview = () => refreshAll(true);
+
+      main().catch((err) => {
+        const msg = err?.message || String(err);
+        $("content").innerHTML = `
+          <div class="error-panel">
+            <div class="empty-icon"><i data-lucide="unplug"></i></div>
+            <h3>无法加载记忆管理页</h3>
+            <p class="err-msg">${esc(msg)}</p>
+            <button class="btn" onclick="location.reload()"><i data-lucide="rotate-cw"></i>重新加载</button>
+          </div>`;
+        refreshIcons();
+      });
+    </script>
+  </body>
+</html>
