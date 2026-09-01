@@ -15,6 +15,9 @@ from astrbot.api.event import AstrMessageEvent
 
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
+# 后台小模型未配置时的回退告警只提示一次，避免每轮巩固重复刷日志
+_FALLBACK_WARNED = False
+
 
 async def call_background_llm(
     context,
@@ -28,6 +31,8 @@ async def call_background_llm(
 
     未配置 background_llm_provider 时，回退到当前会话正在使用的对话模型。
     """
+    global _FALLBACK_WARNED
+
     provider_id = (config or {}).get("background_llm_provider") or ""
     try:
         if provider_id:
@@ -37,6 +42,12 @@ async def call_background_llm(
                 system_prompt=system_prompt,
             )
         else:
+            if not _FALLBACK_WARNED:
+                logger.warning(
+                    "[Memoir] 未配置后台小模型（background_llm_provider），"
+                    "记忆巩固将使用当前对话模型，批量抽取可能产生额外 token 成本"
+                )
+                _FALLBACK_WARNED = True
             umo = event.unified_msg_origin if event else None
             provider = await context.get_using_provider_async(umo=umo)
             if provider is None:
