@@ -80,3 +80,7 @@ uv sync
 uv add <package>
 uv export --no-hashes --format requirements-txt > requirements.txt
 ```
+
+## 许可证
+
+[MIT](LICENSE)
