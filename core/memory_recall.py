@@ -226,8 +226,12 @@ async def handle_recall(
     scope_type = "private" if event.is_private_chat() else "group"
     if scope_type == "private" and not config.get("enable_private_memory", True):
         return
-    if scope_type == "group" and not config.get("enable_group_memory", True):
-        return
+    if scope_type == "group":
+        if not config.get("enable_group_memory", True):
+            return
+        if not event.get_group_id():
+            # 适配器未提供群号时无法归属 scope，跳过以免命中混合记忆池
+            return
 
     scope = resolve_scope(event)
     config = merge_scope_config(

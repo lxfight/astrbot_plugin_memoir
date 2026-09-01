@@ -87,6 +87,9 @@ async def handle_group_response(
     """
     if not config.get("enable_group_memory", True):
         return
+    if not event.get_group_id():
+        # 适配器未提供群号时无法归属 scope，跳过以免所有群混入同一记忆池
+        return
     assistant_text = (resp.completion_text or "").strip()
     if not assistant_text:
         return
@@ -110,6 +113,9 @@ async def handle_group_message(
 ) -> None:
     """群聊场景：被动捕获的消息原文落库（指令、忽略名单用户与关键词命中的消息除外）"""
     if not config.get("enable_group_memory", True):
+        return
+    if not event.get_group_id():
+        # 适配器未提供群号时无法归属 scope，跳过以免所有群混入同一记忆池
         return
     text = _capture_text(event)
     if not text or text.startswith("/"):

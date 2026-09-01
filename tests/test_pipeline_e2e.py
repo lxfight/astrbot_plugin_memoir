@@ -436,6 +436,24 @@ async def test_group_capture_consolidation_and_bridge(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_group_paths_skip_when_group_id_missing():
+    """适配器未提供群号时，捕获与召回都跳过，避免混入同一记忆池"""
+    store = await _make_store()
+    handler = EventHandler(None, dict(BASE_CONFIG), store)
+    event = make_event("群聊消息", private=False)
+    event.message_obj.group = None
+
+    await handler.on_group_message(event)
+    req = ProviderRequest(prompt="群聊消息")
+    await handler.on_llm_request(event, req)
+    await handler.on_llm_response(event, make_resp("好的"))
+
+    assert await store.list_scopes() == []
+    assert req.extra_user_content_parts == []
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_scope_override_gates_capture_and_recall():
     store = await _make_store()
     handler = EventHandler(None, dict(BASE_CONFIG), store)
