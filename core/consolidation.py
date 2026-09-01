@@ -156,7 +156,9 @@ async def _consolidate_scope(
         raw_turns = await store.get_pending_raw(scope_type, scope_key, _BATCH_LIMIT)
         if not raw_turns:
             break
-        structured = await store.get_semantic_memories(scope_type, scope_key)
+        structured = await store.get_semantic_memories(
+            scope_type, scope_key, _SEMANTIC_CAP_PER_SCOPE
+        )
 
         bridge_instruction = (
             _BRIDGE_INSTRUCTION_GROUP
