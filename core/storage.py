@@ -228,18 +228,22 @@ class MemoryStore:
     async def update_memory_content(
         self, memory_id: int, content: str, importance: int | None = None
     ) -> None:
-        """直接覆盖更新（当前版本的语义记忆更新策略）"""
+        """直接覆盖更新（当前版本的语义记忆更新策略）。
+
+        更新即重新激活：strength 重置为 1.0 并刷新 updated_at，
+        衰减从更新时刻重新起算。
+        """
         if self.connection is None:
             return
         now = int(time.time())
         if importance is not None:
             await self.connection.execute(
-                "UPDATE memories SET content = ?, importance = ?, updated_at = ? WHERE id = ?",
+                "UPDATE memories SET content = ?, importance = ?, strength = 1.0, updated_at = ? WHERE id = ?",
                 (content, importance, now, memory_id),
             )
         else:
             await self.connection.execute(
-                "UPDATE memories SET content = ?, updated_at = ? WHERE id = ?",
+                "UPDATE memories SET content = ?, strength = 1.0, updated_at = ? WHERE id = ?",
                 (content, now, memory_id),
             )
         await self.connection.commit()
@@ -796,41 +800,58 @@ class MemoryStore:
         return deleted
 
     async def reinforce_memories(self, memory_ids: list[int]) -> None:
-        """召回命中后强化：重置强度为 1.0（模拟越常被想起的记忆越难忘）"""
+        """召回命中后强化：重置强度为 1.0 并刷新激活时间（模拟越常被想起的记忆越难忘）。
+
+        衰减由 updated_at 起算，刷新激活时间保证强化收益从强化时刻
+        重新计衰减，不会被旧的激活时间一次性抵消。
+        """
         if self.connection is None or not memory_ids:
             return
         placeholders = ",".join("?" * len(memory_ids))
         await self.connection.execute(
-            f"UPDATE memories SET strength = 1.0 WHERE id IN ({placeholders})",
-            memory_ids,
+            f"UPDATE memories SET strength = 1.0, updated_at = ? WHERE id IN ({placeholders})",
+            (int(time.time()), *memory_ids),
         )
         await self.connection.commit()
 
     async def decay_and_forget(
         self, decay_rate_semantic: float, decay_rate_insight: float
     ) -> None:
-        """对语义记忆/洞察按类型施加一次指数衰减（影响排序优先级），不做物理删除。
+        """按距上次激活的自然日数重算语义记忆/洞察的强度（影响排序优先级），不做物理删除。
 
-        每个巩固周期把 strength 乘以一次保留比例，与配置项描述一致。
-        插入/更新/召回强化都会把 strength 重置为 1.0，因此最近活跃的
-        记忆从下个周期起才重新衰减，强化收益不会被旧的 updated_at 抵消。
-
-        原始轮次的遗忘由 prune_raw 按 TTL + 容量上限处理，更贴近真实遗忘行为。
+        strength 是墙钟时间的纯函数：strength = 保留比例 ** 流逝天数，
+        激活指写入、更新或召回强化（三者都会把 updated_at 刷新为当前时刻）。
+        与巩固扫描周期无关——调整扫描频率不会改变遗忘速度，长时间停机后的
+        首次扫描也会一次性补齐期间累积的衰减；重复执行幂等，不会像逐次
+        相乘那样在陈旧强度上叠加。容量淘汰由 prune_semantic 按同一优先级
+        处理；原始轮次的遗忘由 prune_raw 按 TTL + 容量上限处理。
 
         Args:
-            decay_rate_semantic: 语义记忆每个周期的强度保留比例（0-1）。
-            decay_rate_insight: 洞察每个周期的强度保留比例（0-1）。
+            decay_rate_semantic: 语义记忆每自然日的强度保留比例（0-1）。
+            decay_rate_insight: 洞察每自然日的强度保留比例（0-1）。
         """
         if self.connection is None:
             return
-        for memory_type, rate in (
-            ("semantic", decay_rate_semantic),
-            ("insight", decay_rate_insight),
-        ):
-            clamped_rate = max(0.0, min(1.0, rate))
-            await self.connection.execute(
-                "UPDATE memories SET strength = strength * ? WHERE memory_type = ?",
-                (clamped_rate, memory_type),
+        rates = {
+            "semantic": max(0.0, min(1.0, decay_rate_semantic)),
+            "insight": max(0.0, min(1.0, decay_rate_insight)),
+        }
+        now = int(time.time())
+        async with self.connection.execute(
+            "SELECT id, memory_type, updated_at FROM memories "
+            "WHERE memory_type IN ('semantic', 'insight')"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        updates = []
+        for row in rows:
+            rate = rates.get(row["memory_type"])
+            if rate is None:
+                continue
+            days = max(0.0, (now - row["updated_at"]) / 86400.0)
+            updates.append((rate**days, row["id"]))
+        if updates:
+            await self.connection.executemany(
+                "UPDATE memories SET strength = ? WHERE id = ?", updates
             )
         await self.connection.commit()
 

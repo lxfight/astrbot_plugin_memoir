@@ -5,6 +5,8 @@ cue extraction, LIKE-based relevance ranking, recall reinforcement vs
 decay interaction, semantic capacity pruning, and LLM op validation.
 """
 
+import time
+
 import pytest
 
 from core.consolidation import _apply_insight, _apply_semantic_ops
@@ -148,22 +150,65 @@ async def test_search_raw_hits_raw_turns():
 # ==================== store: reinforce vs decay ====================
 
 
+async def _backdate_memory(store: MemoryStore, memory_id: int, days_ago: float) -> None:
+    """把记忆的 updated_at 回拨到 days_ago 天前，模拟长时间未激活"""
+    ts = int(time.time() - days_ago * 86400)
+    await store.connection.execute(
+        "UPDATE memories SET updated_at = ? WHERE id = ?", (ts, memory_id)
+    )
+    await store.connection.commit()
+
+
 @pytest.mark.asyncio
-async def test_reinforce_resets_decay_base():
+async def test_decay_uses_wall_clock_days():
+    store = await _make_store()
+    old_id = await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="旧认知",
+    )
+    await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="新认知",
+    )
+    await _backdate_memory(store, old_id, 2)
+    await store.decay_and_forget(0.5, 0.5)
+    rows = {
+        r["content"]: r["strength"]
+        for r in await store.get_scope_memories("private", "p:1")
+    }
+    # 衰减由距上次激活的实际天数驱动，与扫描周期无关
+    assert rows["旧认知"] == pytest.approx(0.25)
+    assert rows["新认知"] == pytest.approx(1.0)
+    # 重算幂等：时间未流逝时重复衰减不叠加
+    await store.decay_and_forget(0.5, 0.5)
+    rows = {
+        r["content"]: r["strength"]
+        for r in await store.get_scope_memories("private", "p:1")
+    }
+    assert rows["旧认知"] == pytest.approx(0.25)
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_reinforce_resets_decay_clock():
     store = await _make_store()
     mid = await store.insert_memory(
         scope_type="private",
         scope_key="p:1",
         memory_type="semantic",
-        content="老认知",
+        content="被召回的记忆",
     )
+    await _backdate_memory(store, mid, 2)
     await store.decay_and_forget(0.5, 0.5)
     await store.reinforce_memories([mid])
     await store.decay_and_forget(0.5, 0.5)
     rows = await store.get_scope_memories("private", "p:1")
-    # after reinforcement one decay pass halves 1.0 -> 0.5;
-    # the old elapsed-based formula would stack extra decay on the stale base
-    assert rows[0]["strength"] == pytest.approx(0.5)
+    # 召回强化刷新激活时间，衰减从强化时刻重新起算
+    assert rows[0]["strength"] == pytest.approx(1.0)
     await store.close()
 
 

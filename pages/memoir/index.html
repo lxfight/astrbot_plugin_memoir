@@ -1114,7 +1114,7 @@
             { key: "consolidation_count_threshold_group", label: "群聊触发阈值（条）", type: "number", min: 1, max: 1000 },
             { key: "consolidation_idle_hours", label: "静默触发（小时）", type: "number", min: 1, max: 168 },
             { key: "raw_retention_days", label: "原文保留天数", type: "number", min: 1, max: 365 },
-            { key: "decay_rate_semantic", label: "语义衰减系数", type: "float", hint: "每周期强度保留比例 0-1" },
+            { key: "decay_rate_semantic", label: "语义衰减系数", type: "float", hint: "每自然日强度保留比例 0-1，按距上次激活的实际天数折算" },
             { key: "decay_rate_insight", label: "洞察衰减系数", type: "float", hint: "洞察几乎不遗忘，接近 1" },
           ],
         },
