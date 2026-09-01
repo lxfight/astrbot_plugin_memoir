@@ -37,7 +37,7 @@ def test_extract_terms_ascii_words():
     assert "LLM" in terms
 
 
-def test_extract_terms_strips_urls_and_placeholders():
+def test_extract_terms_filters_urls_and_placeholders():
     terms = extract_terms("看这个 https://example.com/path [图片]")
     assert "https" not in terms
     assert "example" not in terms
@@ -58,7 +58,6 @@ async def _make_store() -> MemoryStore:
     return store
 
 
-@pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_insert_raw_turn_touches_scope_in_one_call():
     store = await _make_store()
