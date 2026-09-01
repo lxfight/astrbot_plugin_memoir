@@ -69,6 +69,57 @@ _ASCII_WORD_RE = re.compile(r"[A-Za-z0-9]+")
 _URL_RE = re.compile(r"(?:https?://|www\.)\S+")
 _PLACEHOLDER_RE = re.compile(r"\[[^\]]*\]")
 
+# 高频功能词 bigram：作为检索线索只有噪声，还会挤占有限的线索名额。
+# 只收纯功能词组合，避免误伤「上海」这类含停用字的实词；
+# 两字都是单字停用词的组合（"我的""这个"等）由通用规则过滤。
+_CJK_BIGRAM_STOPWORDS = {
+    "还是",
+    "但是",
+    "可是",
+    "只是",
+    "或是",
+    "或者",
+    "而且",
+    "并且",
+    "所以",
+    "因为",
+    "因此",
+    "如果",
+    "虽然",
+    "然后",
+    "于是",
+    "不过",
+    "什么",
+    "怎么",
+    "我们",
+    "你们",
+    "大家",
+    "自己",
+    "别人",
+    "一个",
+    "一下",
+    "一些",
+    "一样",
+    "一起",
+    "一直",
+    "没有",
+    "不能",
+    "不会",
+    "不要",
+    "不用",
+    "可以",
+    "应该",
+    "需要",
+    "可能",
+    "已经",
+    "这样",
+    "那样",
+    "这么",
+    "现在",
+    "时候",
+    "刚才",
+}
+
 # 上下文线索扩展：从最近几轮原文补充检索线索（同义词常出现在前后文）
 _CONTEXT_CUE_TURNS = 3
 _MAX_QUERY_TERMS = 20
@@ -92,6 +143,11 @@ def extract_terms(text: str, max_terms: int = 12) -> list[str]:
         # 对每段中文做二字滑窗
         for i in range(len(cjk) - 1):
             gram = cjk[i : i + 2]
+            # 两字均为停用字（"我的"），或命中功能词表（"可以"）的组合不是有效线索
+            if gram in _CJK_BIGRAM_STOPWORDS or (
+                gram[0] in _STOPWORDS and gram[1] in _STOPWORDS
+            ):
+                continue
             if gram in seen:
                 continue
             seen.add(gram)

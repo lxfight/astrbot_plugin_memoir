@@ -46,6 +46,16 @@ def test_extract_terms_filters_urls_and_placeholders():
     assert "图片" not in terms
 
 
+def test_extract_terms_filters_function_bigrams():
+    terms = extract_terms("我觉得这个可以，还是去北京吧")
+    # 高频功能词组合不作为线索，避免挤占线索名额
+    assert "这个" not in terms
+    assert "可以" not in terms
+    assert "还是" not in terms
+    # 含停用字的实词不受影响
+    assert "北京" in terms
+
+
 def test_extract_terms_caps_length():
     text = "一二三四五六七八九十甲乙丙丁戊己庚辛壬癸"
     assert len(extract_terms(text)) <= 12
