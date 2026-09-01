@@ -566,6 +566,41 @@ async def test_consolidation_llm_failure_keeps_pending(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_consolidation_pass_caps_scopes_and_prefers_backlog(monkeypatch):
+    """单次扫描最多处理 _MAX_SCOPES_PER_PASS 个 scope，优先积压最大者"""
+    store = await _make_store()
+
+    async def fake_llm(context, config, *, prompt, system_prompt, event=None):
+        return '{"semantic_ops": [], "insight": null}'
+
+    monkeypatch.setattr(consolidation_module, "call_background_llm", fake_llm)
+    monkeypatch.setattr(consolidation_module, "_MAX_SCOPES_PER_PASS", 2)
+    config = {
+        "consolidation_count_threshold_private": 1,
+        "consolidation_count_threshold_group": 1,
+    }
+    # 三个 scope 均达到触发阈值；积压最大的 g:2、g:1 应优先处理
+    for scope_key, n in (("p:1", 3), ("g:1", 4), ("g:2", 5)):
+        for i in range(n):
+            await store.insert_raw_turn(
+                scope_type="group" if scope_key.startswith("g") else "private",
+                scope_key=scope_key,
+                content=f"{scope_key} 第{i}轮",
+            )
+
+    processed = await consolidation_module.run_consolidation_pass(None, config, store)
+
+    assert processed == 2
+    activity = {
+        row["scope_key"]: row["pending"] for row in await store.get_scope_activity()
+    }
+    assert activity["g:2"] == 0
+    assert activity["g:1"] == 0
+    assert activity["p:1"] == 3
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_consolidation_batch_respects_char_budget(monkeypatch):
     """单批超过字符预算的轮次不进 prompt，留待后续批次（水位安全）"""
     store = await _make_store()

@@ -360,6 +360,12 @@ async def _bridge_self_statements(
         )
 
 
+# 单次巩固扫描最多处理的 scope 数：LLM 调用成本与活跃 scope 数成正比，
+# 没有总闸时机器人加入大量群聊会让每次扫描最多触发 scopes×批数 次调用。
+# 优先消化积压最大的 scope，其余留待下一轮扫描。
+_MAX_SCOPES_PER_PASS = 8
+
+
 async def run_consolidation_pass(context, config: dict, store: MemoryStore) -> int:
     """执行一轮巩固扫描，返回处理的 scope 数量。
 
@@ -392,6 +398,9 @@ async def run_consolidation_pass(context, config: dict, store: MemoryStore) -> i
         idle_expired = (now - last_ref) >= idle_seconds
         if pending >= threshold or idle_expired:
             due_scopes.append(row)
+
+    due_scopes.sort(key=lambda row: row["pending"], reverse=True)
+    due_scopes = due_scopes[:_MAX_SCOPES_PER_PASS]
 
     for item in due_scopes:
         try:
