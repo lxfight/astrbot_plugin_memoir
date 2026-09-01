@@ -205,10 +205,14 @@ class MemoirPlugin(Star):
     _MEMORY_TYPE_NAMES = {"semantic": "认知", "insight": "洞察", "raw": "对话"}
 
     @filter.command("memoir")
-    async def memoir(self, event: AstrMessageEvent):
-        """查看当前会话的记忆统计（管理操作请在 WebUI 的插件页面中进行）"""
+    async def memoir(self, event: AstrMessageEvent, action: str = "", value: str = ""):
+        """查看当前会话的记忆统计；consent 子指令管理群聊自我陈述桥接授权"""
         if not self._initialized:
             yield event.plain_result("[Memoir] 记忆系统尚未初始化完成，请稍后再试")
+            return
+        if action == "consent":
+            async for result in self._handle_bridge_consent(event, value):
+                yield result
             return
         scope = resolve_scope(event)
         stats = await self.store.get_scope_stats(scope.scope_type, scope.scope_key)
@@ -224,3 +228,31 @@ class MemoirPlugin(Star):
             + "，".join(parts)
             + "\n查看和管理记忆请打开 WebUI 的插件页面。"
         )
+
+    async def _handle_bridge_consent(self, event: AstrMessageEvent, value: str):
+        """群聊自我陈述桥接的个人授权（用户自助，无需管理员代操作）。
+
+        授权记录按 (platform, sender_id) 保存；实际桥接仍受全局/会话桥接
+        开关与敏感度上限约束。value 为空时展示当前状态与用法。
+        """
+        platform = event.get_platform_name()
+        sender_id = event.get_sender_id()
+        if not sender_id:
+            yield event.plain_result("[Memoir] 无法识别发送者身份，授权失败")
+            return
+        flag = str(value).strip().lower()
+        if flag in ("on", "enable", "1", "开", "开启"):
+            await self.store.set_bridge_enabled(platform, sender_id, True)
+            yield event.plain_result(
+                "[Memoir] 已开启桥接授权：你在群聊中讲述自己的内容，巩固后可能"
+                "进入你与机器人的私聊记忆（受敏感度过滤）。可用 /memoir consent off 关闭。"
+            )
+        elif flag in ("off", "disable", "0", "关", "关闭"):
+            await self.store.set_bridge_enabled(platform, sender_id, False)
+            yield event.plain_result("[Memoir] 已关闭桥接授权")
+        else:
+            enabled = await self.store.is_bridge_enabled(platform, sender_id)
+            yield event.plain_result(
+                f"[Memoir] 当前桥接授权：{'已开启' if enabled else '未开启'}。\n"
+                "开启：/memoir consent on；关闭：/memoir consent off。"
+            )
