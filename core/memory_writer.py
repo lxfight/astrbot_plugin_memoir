@@ -108,7 +108,7 @@ async def handle_group_response(
 async def handle_group_message(
     context, config: dict, store: MemoryStore, event: AstrMessageEvent
 ) -> None:
-    """群聊场景：被动捕获的消息原文落库（指令消息除外，会话可单独禁用）"""
+    """群聊场景：被动捕获的消息原文落库（指令、忽略名单用户与关键词命中的消息除外）"""
     if not config.get("enable_group_memory", True):
         return
     text = _capture_text(event)
@@ -121,6 +121,21 @@ async def handle_group_message(
         scope.scope_type,
     )
     if not config.get("scope_enabled", True):
+        return
+    # 隐私过滤：名单用户与关键词命中的消息不落库（捕获侧丢弃，召回自然不可见）
+    ignored_users = {
+        str(u).strip()
+        for u in config.get("group_capture_ignored_users") or []
+        if str(u).strip()
+    }
+    if scope.subject and scope.subject in ignored_users:
+        return
+    ignored_keywords = [
+        str(k).strip()
+        for k in config.get("group_capture_ignored_keywords") or []
+        if str(k).strip()
+    ]
+    if any(k in text for k in ignored_keywords):
         return
     await store.insert_raw_turn(
         scope_type=scope.scope_type,

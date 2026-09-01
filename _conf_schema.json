@@ -77,6 +77,18 @@
     ],
     "default": "low"
   },
+  "group_capture_ignored_users": {
+    "description": "群聊捕获忽略的用户",
+    "type": "list",
+    "hint": "名单内的发送者 ID，其群聊消息不落库、不参与记忆",
+    "default": []
+  },
+  "group_capture_ignored_keywords": {
+    "description": "群聊捕获忽略的关键词",
+    "type": "list",
+    "hint": "群聊消息包含任一关键词（子串匹配）时不落库",
+    "default": []
+  },
   "decay_rate_semantic": {
     "description": "语义记忆衰减系数",
     "type": "float",

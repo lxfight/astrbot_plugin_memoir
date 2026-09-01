@@ -40,6 +40,8 @@ GLOBAL_CONFIG_KEYS = (
     "decay_rate_insight",
     "enable_cross_scope_bridge",
     "bridge_max_sensitivity",
+    "group_capture_ignored_users",
+    "group_capture_ignored_keywords",
 )
 GLOBAL_DEFAULTS = {
     "enable_private_memory": True,
@@ -57,6 +59,8 @@ GLOBAL_DEFAULTS = {
     "decay_rate_insight": 0.995,
     "enable_cross_scope_bridge": False,
     "bridge_max_sensitivity": "low",
+    "group_capture_ignored_users": [],
+    "group_capture_ignored_keywords": [],
 }
 GLOBAL_SELECTS = {"bridge_max_sensitivity": ("low", "medium", "high")}
 
@@ -85,6 +89,7 @@ _INT_KEYS = {
     "consolidation_count_threshold",
 }
 _FLOAT_KEYS = {"decay_rate_semantic", "decay_rate_insight"}
+_LIST_KEYS = {"group_capture_ignored_users", "group_capture_ignored_keywords"}
 _BOOL_KEYS = {
     "enable_private_memory",
     "enable_group_memory",
@@ -120,6 +125,12 @@ def _validate_config_payload(
                 cleaned[key] = min(1.0, max(0.0, float(value)))
             except (TypeError, ValueError):
                 return None
+        elif key in _LIST_KEYS:
+            # 接受列表或逗号分隔字符串，统一归一化为去空白的字符串列表
+            items = value.split(",") if isinstance(value, str) else value
+            if not isinstance(items, list):
+                return None
+            cleaned[key] = [str(item).strip() for item in items if str(item).strip()]
         elif key in selects:
             if value not in selects[key]:
                 return None
