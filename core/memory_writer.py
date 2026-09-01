@@ -67,7 +67,6 @@ async def handle_private_response(
         scope_key=scope.scope_key,
         content=content[:_MAX_CONTENT_LENGTH],
     )
-    await store.touch_scope(scope.scope_type, scope.scope_key)
 
 
 async def handle_group_response(
@@ -104,7 +103,6 @@ async def handle_group_response(
         scope_key=scope.scope_key,
         content=f"助手: {assistant_text}"[:_MAX_CONTENT_LENGTH],
     )
-    await store.touch_scope(scope.scope_type, scope.scope_key)
 
 
 async def handle_group_message(
@@ -131,4 +129,3 @@ async def handle_group_message(
         speaker_id=scope.subject,
         speaker_name=event.get_sender_name() or None,
     )
-    await store.touch_scope(scope.scope_type, scope.scope_key)

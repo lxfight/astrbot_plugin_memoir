@@ -98,6 +98,9 @@ class MemoryStore:
     def __init__(self, db_path: str | Path):
         self.db_path = str(db_path)
         self.connection: aiosqlite.Connection | None = None
+        # scope_configs 仅在 WebUI 编辑时变更，而捕获/召回路径每条消息都会读取，
+        # 用内存缓存换掉每条消息一次的 DB 往返；写路径负责同步失效
+        self._scope_config_cache: dict[tuple[str, str], dict[str, Any]] = {}
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
 
     async def initialize(self) -> None:
@@ -144,21 +147,6 @@ class MemoryStore:
             self.connection = None
 
     # ==================== scopes ====================
-
-    async def touch_scope(self, scope_type: str, scope_key: str) -> None:
-        """更新 scope 最近活跃时间，不存在则创建"""
-        if self.connection is None:
-            return
-        now = int(time.time())
-        await self.connection.execute(
-            """
-            INSERT INTO scopes (scope_type, scope_key, last_activity_at, last_consolidated_at, created_at)
-            VALUES (?, ?, ?, NULL, ?)
-            ON CONFLICT(scope_type, scope_key) DO UPDATE SET last_activity_at = excluded.last_activity_at
-            """,
-            (scope_type, scope_key, now, now),
-        )
-        await self.connection.commit()
 
     async def mark_scope_consolidated(self, scope_type: str, scope_key: str) -> None:
         if self.connection is None:
@@ -265,7 +253,21 @@ class MemoryStore:
         speaker_id: str | None = None,
         speaker_name: str | None = None,
     ) -> int:
-        """原始对话轮次落库（零 LLM 成本），供检索引用与周期批量抽取"""
+        """原始对话轮次落库（零 LLM 成本），并在同一事务内更新会话活跃时间。
+
+        供检索引用与周期批量抽取。scopes 记录随插入一并 upsert，
+        捕获路径从「insert + touch」两次提交降为一次。
+
+        Args:
+            scope_type: 会话类型（private/group）。
+            scope_key: 会话标识。
+            content: 消息原文，超长截断到 2000 字符。
+            speaker_id: 发言人 id（群聊），私聊为 None。
+            speaker_name: 发言人昵称（群聊），私聊为 None。
+
+        Returns:
+            新插入轮次的 id。
+        """
         if self.connection is None:
             raise RuntimeError("数据库连接未初始化")
         now = int(time.time())
@@ -275,6 +277,14 @@ class MemoryStore:
             VALUES (?, ?, ?, ?, ?, 0, ?)
             """,
             (scope_type, scope_key, speaker_id, speaker_name, content[:2000], now),
+        )
+        await self.connection.execute(
+            """
+            INSERT INTO scopes (scope_type, scope_key, last_activity_at, last_consolidated_at, created_at)
+            VALUES (?, ?, ?, NULL, ?)
+            ON CONFLICT(scope_type, scope_key) DO UPDATE SET last_activity_at = excluded.last_activity_at
+            """,
+            (scope_type, scope_key, now, now),
         )
         await self.connection.commit()
         return cursor.lastrowid or 0
@@ -673,7 +683,10 @@ class MemoryStore:
     # ==================== scope configs ====================
 
     async def get_scope_config(self, scope_type: str, scope_key: str) -> dict[str, Any]:
-        """读取会话级配置覆盖，无覆盖时返回空 dict"""
+        """读取会话级配置覆盖，无覆盖时返回空 dict（结果缓存，写路径失效）"""
+        cache_key = (scope_type, scope_key)
+        if cache_key in self._scope_config_cache:
+            return self._scope_config_cache[cache_key]
         if self.connection is None:
             return {}
         async with self.connection.execute(
@@ -682,15 +695,18 @@ class MemoryStore:
         ) as cursor:
             row = await cursor.fetchone()
         if not row:
-            return {}
-        try:
-            data = json.loads(row["config_json"])
-            return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, TypeError):
-            return {}
+            data: dict[str, Any] = {}
+        else:
+            try:
+                loaded = json.loads(row["config_json"])
+                data = loaded if isinstance(loaded, dict) else {}
+            except (json.JSONDecodeError, TypeError):
+                data = {}
+        self._scope_config_cache[cache_key] = data
+        return data
 
     async def get_all_scope_configs(self) -> dict[tuple[str, str], dict[str, Any]]:
-        """一次性读取全部会话配置覆盖，供巩固扫描按 scope 取阈值"""
+        """一次性读取全部会话配置覆盖，供巩固扫描按 scope 取阈值（同时刷新缓存）"""
         if self.connection is None:
             return {}
         result: dict[tuple[str, str], dict[str, Any]] = {}
@@ -705,14 +721,16 @@ class MemoryStore:
                     result[(row["scope_type"], row["scope_key"])] = data
             except (json.JSONDecodeError, TypeError):
                 continue
+        self._scope_config_cache = result
         return result
 
     async def set_scope_config(
         self, scope_type: str, scope_key: str, config: dict[str, Any]
     ) -> None:
-        """写入会话配置覆盖；config 为空时删除覆盖（完全继承全局）"""
+        """写入会话配置覆盖；config 为空时删除覆盖（完全继承全局）。同步维护缓存"""
         if self.connection is None:
             return
+        cache_key = (scope_type, scope_key)
         if config:
             await self.connection.execute(
                 """
@@ -727,11 +745,13 @@ class MemoryStore:
                     int(time.time()),
                 ),
             )
+            self._scope_config_cache[cache_key] = dict(config)
         else:
             await self.connection.execute(
                 "DELETE FROM scope_configs WHERE scope_type = ? AND scope_key = ?",
                 (scope_type, scope_key),
             )
+            self._scope_config_cache.pop(cache_key, None)
         await self.connection.commit()
 
     async def delete_memory_in_scope(

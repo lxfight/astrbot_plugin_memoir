@@ -290,7 +290,6 @@ async def _bridge_self_statements(
             scope_key=target_key,
             content=f"用户: {content}",
         )
-        await store.touch_scope("private", target_key)
 
 
 async def run_consolidation_pass(context, config: dict, store: MemoryStore) -> int:

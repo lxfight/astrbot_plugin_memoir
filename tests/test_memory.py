@@ -59,6 +59,34 @@ async def _make_store() -> MemoryStore:
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_insert_raw_turn_touches_scope_in_one_call():
+    store = await _make_store()
+    await store.insert_raw_turn(
+        scope_type="group", scope_key="g:1", content="大家好", speaker_name="张三"
+    )
+    # scope 活跃记录随插入一并 upsert，巩固扫描能看到待处理轮次
+    activity = await store.get_scope_activity()
+    assert len(activity) == 1
+    assert activity[0]["scope_key"] == "g:1"
+    assert activity[0]["pending"] == 1
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_scope_config_cache_invalidation():
+    store = await _make_store()
+    assert await store.get_scope_config("private", "p:1") == {}
+    await store.set_scope_config("private", "p:1", {"enabled": False})
+    assert await store.get_scope_config("private", "p:1") == {"enabled": False}
+    assert ("private", "p:1") in await store.get_all_scope_configs()
+    # 空覆盖 = 删除并回到继承全局
+    await store.set_scope_config("private", "p:1", {})
+    assert await store.get_scope_config("private", "p:1") == {}
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_search_prefers_multi_term_and_tag_hits():
     store = await _make_store()
     await store.insert_memory(
