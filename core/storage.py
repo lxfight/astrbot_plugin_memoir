@@ -738,37 +738,32 @@ class MemoryStore:
         await self.connection.commit()
 
     async def decay_and_forget(
-        self,
-        decay_rate_semantic: float,
-        decay_rate_insight: float,
-        interval_seconds: int,
-    ) -> int:
+        self, decay_rate_semantic: float, decay_rate_insight: float
+    ) -> None:
         """对语义记忆/洞察按类型施加一次指数衰减（影响排序优先级），不做物理删除。
+
+        每个巩固周期把 strength 乘以一次保留比例，与配置项描述一致。
+        插入/更新/召回强化都会把 strength 重置为 1.0，因此最近活跃的
+        记忆从下个周期起才重新衰减，强化收益不会被旧的 updated_at 抵消。
 
         原始轮次的遗忘由 prune_raw 按 TTL + 容量上限处理，更贴近真实遗忘行为。
 
-        衰减强度按「距上次巩固/更新的扫描周期数」计算：
-        strength *= rate^(elapsed_periods)，rate 为每个周期的保留比例。
+        Args:
+            decay_rate_semantic: 语义记忆每个周期的强度保留比例（0-1）。
+            decay_rate_insight: 洞察每个周期的强度保留比例（0-1）。
         """
         if self.connection is None:
-            return 0
-        now = int(time.time())
-        interval = max(interval_seconds, 1)
+            return
         for memory_type, rate in (
             ("semantic", decay_rate_semantic),
             ("insight", decay_rate_insight),
         ):
             clamped_rate = max(0.0, min(1.0, rate))
             await self.connection.execute(
-                """
-                UPDATE memories
-                SET strength = strength * pow(?, (? - coalesce(updated_at, created_at)) / ?)
-                WHERE memory_type = ?
-                """,
-                (clamped_rate, now, interval, memory_type),
+                "UPDATE memories SET strength = strength * ? WHERE memory_type = ?",
+                (clamped_rate, memory_type),
             )
         await self.connection.commit()
-        return 0
 
     # ==================== bridge consent ====================
 

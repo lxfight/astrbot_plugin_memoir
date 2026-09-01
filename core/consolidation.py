@@ -333,15 +333,12 @@ async def run_consolidation_pass(context, config: dict, store: MemoryStore) -> i
     return len(due_scopes)
 
 
-async def run_forgetting_pass(
-    config: dict, store: MemoryStore, interval_seconds: int
-) -> int:
+async def run_forgetting_pass(config: dict, store: MemoryStore) -> int:
     """遗忘：语义记忆/洞察做强度衰减；原始轮次按 TTL 清理"""
     pruned = await store.prune_raw(int(config.get("raw_retention_days", 14)) * 86400)
     await store.decay_and_forget(
         decay_rate_semantic=float(config.get("decay_rate_semantic", 0.98)),
         decay_rate_insight=float(config.get("decay_rate_insight", 0.995)),
-        interval_seconds=interval_seconds,
     )
     return pruned
 
@@ -383,9 +380,7 @@ class ConsolidationScheduler:
                 processed = await run_consolidation_pass(
                     self.context, self.config, self.store
                 )
-                pruned = await run_forgetting_pass(
-                    self.config, self.store, interval_seconds
-                )
+                pruned = await run_forgetting_pass(self.config, self.store)
                 if processed or pruned:
                     logger.info(
                         f"[Memoir] 巩固扫描完成: {processed} 个 scope 已处理, "
