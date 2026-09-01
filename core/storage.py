@@ -1,8 +1,8 @@
 """
 存储层：基于 aiosqlite 的记忆持久化。
 
-不引入向量数据库。检索依赖 SQLite FTS5 全文匹配 + 结构化字段排序
-（重要性 importance、命中强度 strength、最近命中时间 last_hit_at）。
+不引入向量数据库。检索对 content/tags 做 LIKE 子串匹配，
+按相关性（命中线索数、tags 加权）+ 结构化字段（强度 strength、重要度 importance）排序。
 """
 
 from __future__ import annotations
@@ -31,11 +31,8 @@ CREATE TABLE IF NOT EXISTS memories (
     source_type TEXT DEFAULT 'native',
     source_ref TEXT,
     strength REAL DEFAULT 1.0,
-    consolidated INTEGER DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    last_hit_at INTEGER,
-    hit_count INTEGER DEFAULT 0,
     expire_at INTEGER
 );
 
@@ -45,10 +42,6 @@ CREATE TABLE IF NOT EXISTS memories (
 
 CREATE INDEX IF NOT EXISTS idx_memories_scope
     ON memories(scope_type, scope_key, memory_type);
-
-CREATE INDEX IF NOT EXISTS idx_memories_consolidated
-    ON memories(scope_type, scope_key, consolidated)
-    WHERE consolidated = 0;
 
 -- 原始对话轮次：零成本落库，召回时可直接检索引用原文，
 -- 周期巩固时由 LLM 批量抽取为语义记忆/洞察。
@@ -122,6 +115,26 @@ class MemoryStore:
             logger.info(
                 f"[Memoir] 已清理旧版情景记忆 {cursor.rowcount} 条（改用原始轮次存储）"
             )
+        # 0.1.x 遗留字段：consolidated/last_hit_at/hit_count 在新架构中已无读取方
+        cursor = await self.connection.execute("PRAGMA table_info(memories)")
+        legacy = [
+            row[1]
+            for row in await cursor.fetchall()
+            if row[1] in ("consolidated", "last_hit_at", "hit_count")
+        ]
+        if legacy:
+            await self.connection.execute(
+                "DROP INDEX IF EXISTS idx_memories_consolidated"
+            )
+            for column in legacy:
+                try:
+                    await self.connection.execute(
+                        f"ALTER TABLE memories DROP COLUMN {column}"
+                    )
+                except aiosqlite.OperationalError:
+                    # SQLite < 3.35 不支持 DROP COLUMN；旧列保留不影响运行
+                    pass
+            logger.info(f"[Memoir] 已清理旧版字段: {', '.join(legacy)}")
         await self.connection.commit()
         logger.info(f"[Memoir] 数据库初始化完成: {self.db_path}")
 
@@ -200,9 +213,9 @@ class MemoryStore:
             INSERT INTO memories (
                 scope_type, scope_key, memory_type, subject, content, tags,
                 importance, sensitivity_level, sensitivity_category,
-                source_type, source_ref, strength, consolidated,
+                source_type, source_ref,
                 created_at, updated_at, expire_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1.0, 0, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 scope_type,
@@ -756,18 +769,13 @@ class MemoryStore:
         return deleted
 
     async def reinforce_memories(self, memory_ids: list[int]) -> None:
-        """召回命中后强化：重置强度、更新命中时间与次数"""
+        """召回命中后强化：重置强度为 1.0（模拟越常被想起的记忆越难忘）"""
         if self.connection is None or not memory_ids:
             return
-        now = int(time.time())
         placeholders = ",".join("?" * len(memory_ids))
         await self.connection.execute(
-            f"""
-            UPDATE memories
-            SET strength = 1.0, last_hit_at = ?, hit_count = hit_count + 1
-            WHERE id IN ({placeholders})
-            """,
-            (now, *memory_ids),
+            f"UPDATE memories SET strength = 1.0 WHERE id IN ({placeholders})",
+            memory_ids,
         )
         await self.connection.commit()
 
