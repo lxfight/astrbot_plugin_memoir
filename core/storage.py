@@ -257,6 +257,8 @@ class MemoryStore:
 
         供检索引用与周期批量抽取。scopes 记录随插入一并 upsert，
         捕获路径从「insert + touch」两次提交降为一次。
+        多行内容折叠为单行（" / " 分隔）：原文会逐行拼进巩固 prompt，
+        单行不变量可防止消息内容伪造 prompt 的逐行结构（[#id]/时间戳行）。
 
         Args:
             scope_type: 会话类型（private/group）。
@@ -271,6 +273,11 @@ class MemoryStore:
         if self.connection is None:
             raise RuntimeError("数据库连接未初始化")
         now = int(time.time())
+        content = " / ".join(
+            line.strip()
+            for line in content.replace("\r", "").split("\n")
+            if line.strip()
+        )
         cursor = await self.connection.execute(
             """
             INSERT INTO raw_turns (scope_type, scope_key, speaker_id, speaker_name, content, extracted, created_at)
