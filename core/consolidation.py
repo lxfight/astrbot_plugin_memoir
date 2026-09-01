@@ -453,11 +453,12 @@ class ConsolidationScheduler:
             self._task = None
 
     async def _loop(self) -> None:
-        interval_minutes = int(
-            self.config.get("consolidation_scan_interval_minutes", 30)
-        )
-        interval_seconds = max(60, interval_minutes * 60)
         while not self._stopping:
+            # 每轮循环重读配置：WebUI 修改扫描周期后无需重载插件即可生效
+            interval_minutes = int(
+                self.config.get("consolidation_scan_interval_minutes", 30)
+            )
+            interval_seconds = max(60, interval_minutes * 60)
             try:
                 await asyncio.sleep(interval_seconds)
                 if self._stopping:
