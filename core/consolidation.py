@@ -51,7 +51,8 @@ _CONSOLIDATION_SYSTEM_PROMPT = """你是记忆巩固模块。请把用户消息�
 
 1. semantic_ops：找出值得长期记住的稳定事实（偏好、身份、状态变化、重要事件、承诺、关系），
    对每条判断：
-   - update：某条已有认知已过时，新值直接覆盖旧值（target_id 必须来自上方 [#id]）
+   - update：某条已有认知已过时，新值直接覆盖旧值（target_id 必须来自上方 [#id]）；
+     若新内容的主题与旧条目不同，应一并给出更新后的 tags
    - insert：新增一条认知（模式重复出现，或本身是重要的独立事实）
    - expire：某条已有认知记录的时效性事件已经过期失效（出差已结束、约定已完成、
      状态已再度变化且旧值无保留价值），删除它（target_id 必须来自上方 [#id]）
@@ -73,7 +74,7 @@ _CONSOLIDATION_SYSTEM_PROMPT = """你是记忆巩固模块。请把用户消息�
 
 {{
   "semantic_ops": [
-    {{"action": "update", "target_id": 12, "content": "新的认知内容", "importance": 1-5}},
+    {{"action": "update", "target_id": 12, "content": "新的认知内容", "tags": "主题变化时给出新关键词，可选", "importance": 1-5}},
     {{"action": "insert", "content": "[YYYY-MM-DD] 新的认知内容", "tags": "关键词,同义表达,上位词", "subject": "事实所属的说话人名字，群聊必填，私聊填 null", "importance": 1-5}},
     {{"action": "expire", "target_id": 12}}
   ],
@@ -262,7 +263,9 @@ async def _apply_semantic_ops(
                 importance = max(1, min(5, int(importance))) if importance else None
             except (TypeError, ValueError):
                 importance = None
-            await store.update_memory_content(target_id, content, importance)
+            # tags 缺省时保持旧值；内容主题变化时由模型给出新 tags
+            tags = _clean_memory_text(op.get("tags") or "", max_len=200) or None
+            await store.update_memory_content(target_id, content, importance, tags)
         elif kind == "expire":
             try:
                 target_id = int(op.get("target_id"))

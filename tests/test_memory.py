@@ -375,6 +375,54 @@ async def test_apply_semantic_ops_updates_insight():
 
 
 @pytest.mark.asyncio
+async def test_apply_semantic_ops_update_refreshes_tags():
+    """update 携带 tags 时刷新旧 tags；缺省时保持不变"""
+    store = await _make_store()
+    mid = await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="用户在北京工作",
+        tags="北京,工作",
+    )
+    # 主题变化并给出新 tags
+    await _apply_semantic_ops(
+        store,
+        "private",
+        "p:1",
+        {
+            "semantic_ops": [
+                {
+                    "action": "update",
+                    "target_id": mid,
+                    "content": "用户已搬到上海工作",
+                    "tags": "上海,工作,搬家",
+                }
+            ]
+        },
+        [{"id": mid, "memory_type": "semantic"}],
+    )
+    rows = await store.get_scope_memories("private", "p:1")
+    assert rows[0]["tags"] == "上海,工作,搬家"
+
+    # 不带 tags 的 update 保持旧 tags
+    await _apply_semantic_ops(
+        store,
+        "private",
+        "p:1",
+        {
+            "semantic_ops": [
+                {"action": "update", "target_id": mid, "content": "用户在上海定居"}
+            ]
+        },
+        [{"id": mid, "memory_type": "semantic"}],
+    )
+    rows = await store.get_scope_memories("private", "p:1")
+    assert rows[0]["tags"] == "上海,工作,搬家"
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_apply_semantic_ops_expires_insight():
     store = await _make_store()
     insight_id = await store.insert_memory(

@@ -237,26 +237,34 @@ class MemoryStore:
         return cursor.lastrowid or 0
 
     async def update_memory_content(
-        self, memory_id: int, content: str, importance: int | None = None
+        self,
+        memory_id: int,
+        content: str,
+        importance: int | None = None,
+        tags: str | None = None,
     ) -> None:
         """直接覆盖更新（当前版本的语义记忆更新策略）。
 
         更新即重新激活：strength 重置为 1.0 并刷新 updated_at，
-        衰减从更新时刻重新起算。
+        衰减从更新时刻重新起算。tags 传 None 表示保持不变；
+        内容主题变化时由巩固流程传入新 tags，否则旧 tags 会让
+        更新后的记忆在 tags 加权检索中失配。
         """
         if self.connection is None:
             return
         now = int(time.time())
+        sets = ["content = ?", "strength = 1.0", "updated_at = ?"]
+        params: list[Any] = [content, now]
         if importance is not None:
-            await self.connection.execute(
-                "UPDATE memories SET content = ?, importance = ?, strength = 1.0, updated_at = ? WHERE id = ?",
-                (content, importance, now, memory_id),
-            )
-        else:
-            await self.connection.execute(
-                "UPDATE memories SET content = ?, strength = 1.0, updated_at = ? WHERE id = ?",
-                (content, now, memory_id),
-            )
+            sets.append("importance = ?")
+            params.append(importance)
+        if tags is not None:
+            sets.append("tags = ?")
+            params.append(tags)
+        params.append(memory_id)
+        await self.connection.execute(
+            f"UPDATE memories SET {', '.join(sets)} WHERE id = ?", params
+        )
         await self.connection.commit()
 
     async def insert_raw_turn(
