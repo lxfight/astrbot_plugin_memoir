@@ -425,11 +425,16 @@ class MemoryStore:
         scope_key: str,
         query_terms: list[str],
         top_k: int = 3,
+        exclude_recent: int = 0,
     ) -> list[dict[str, Any]]:
         """线索层检索原始对话轮次：LIKE 子串命中 + 相关性（命中线索数）> 时间新近排序。
 
         原始轮次没有 tags，相关性 = 1 + content 命中线索数；
         原文引用（「上次你说……」）比转述事实更接近真人回忆，与结构化记忆互补。
+
+        Args:
+            exclude_recent: 排除最近 N 条轮次。私聊召回传入当前会话历史
+                可见的轮次数，避免把模型上下文里已有的内容重复注入。
         """
         if self.connection is None or not query_terms:
             return []
@@ -442,18 +447,29 @@ class MemoryStore:
         ]
         content_hits = " + ".join(["(content LIKE ? ESCAPE '\\')"] * len(terms))
         where_clause = " OR ".join(["(content LIKE ? ESCAPE '\\')"] * len(terms))
+        exclude_clause = ""
+        if exclude_recent > 0:
+            exclude_clause = """
+              AND id NOT IN (
+                  SELECT id FROM raw_turns
+                  WHERE scope_type = ? AND scope_key = ?
+                  ORDER BY created_at DESC, id DESC LIMIT ?
+              )"""
         sql = f"""
             SELECT *,
                 (1 + ({content_hits})) AS relevance
             FROM raw_turns
-            WHERE ({where_clause}) AND scope_type = ? AND scope_key = ?
+            WHERE ({where_clause}) AND scope_type = ? AND scope_key = ?{exclude_clause}
             ORDER BY relevance DESC, created_at DESC
             LIMIT ?
         """
         params: list[Any] = []
         params.extend(likes)  # content_hits
         params.extend(likes)  # where OR
-        params.extend([scope_type, scope_key, top_k])
+        params.extend([scope_type, scope_key])
+        if exclude_recent > 0:
+            params.extend([scope_type, scope_key, exclude_recent])
+        params.append(top_k)
         async with self.connection.execute(sql, params) as cursor:
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]

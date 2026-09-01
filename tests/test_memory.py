@@ -157,6 +157,21 @@ async def test_search_raw_hits_raw_turns():
     await store.close()
 
 
+@pytest.mark.asyncio
+async def test_search_raw_excludes_recent_turns():
+    store = await _make_store()
+    for i in range(5):
+        await store.insert_raw_turn(
+            scope_type="private", scope_key="p:1", content=f"第{i}次聊到北京"
+        )
+    # 私聊场景：最近的 2 条仍在当前会话历史里，线索层不重复召回
+    hits = await store.search_raw("private", "p:1", ["北京"], top_k=3, exclude_recent=2)
+    assert len(hits) == 3
+    assert {f"第{i}次" for i in range(3)} <= {h["content"][:3] for h in hits}
+    assert not any("第4次" in h["content"] or "第3次" in h["content"] for h in hits)
+    await store.close()
+
+
 # ==================== store: reinforce vs decay ====================
 
 
