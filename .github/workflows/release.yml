@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches plugin version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          meta_version="$(sed -n 's/^version: *//p' metadata.yaml)"
+          pyproject_version="$(sed -n 's/^version = *"\(.*\)"/\1/p' pyproject.toml)"
+          echo "tag=$tag_version metadata=$meta_version pyproject=$pyproject_version"
+          if [ "$tag_version" != "$meta_version" ]; then
+            echo "::error::metadata.yaml version ($meta_version) does not match tag ($tag_version)"
+            exit 1
+          fi
+          if [ "$tag_version" != "$pyproject_version" ]; then
+            echo "::error::pyproject.toml version ($pyproject_version) does not match tag ($tag_version)"
+            exit 1
+          fi
+
+      - name: Package plugin
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          git archive --format=zip \
+            --prefix="astrbot_plugin_memoir/" \
+            -o "dist/astrbot_plugin_memoir-${version}.zip" HEAD
+          unzip -l "dist/astrbot_plugin_memoir-${version}.zip"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          extra=()
+          case "$version" in
+            *dev*|*alpha*|*beta*|*rc*) extra+=(--prerelease) ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" \
+            "${extra[@]}" \
+            --title "astrbot_plugin_memoir ${version}" \
+            --generate-notes \
+            dist/astrbot_plugin_memoir-"${version}".zip
