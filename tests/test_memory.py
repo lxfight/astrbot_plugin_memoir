@@ -9,7 +9,11 @@ import time
 
 import pytest
 
-from core.consolidation import _apply_insight, _apply_semantic_ops
+from core.consolidation import (
+    _apply_insight,
+    _apply_semantic_ops,
+    _format_semantic_block,
+)
 from core.memory_recall import extract_terms
 from core.storage import MemoryStore
 
@@ -272,6 +276,72 @@ async def test_prune_semantic_keeps_top_ranked():
 
 
 # ==================== consolidation ops ====================
+
+
+def test_format_semantic_block_includes_insights():
+    block = _format_semantic_block(
+        [
+            {"id": 1, "memory_type": "semantic", "content": "用户在北京工作"},
+            {"id": 2, "memory_type": "insight", "content": "用户工作变动频繁"},
+        ]
+    )
+    assert "[#1] 用户在北京工作" in block
+    # 洞察进入巩固 prompt 并带类型标记，模型才能对其 update/expire/去重
+    assert "[#2] [洞察] 用户工作变动频繁" in block
+
+
+@pytest.mark.asyncio
+async def test_apply_semantic_ops_updates_insight():
+    store = await _make_store()
+    insight_id = await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="insight",
+        content="用户工作变动频繁",
+    )
+    parsed = {
+        "semantic_ops": [
+            {
+                "action": "update",
+                "target_id": insight_id,
+                "content": "用户工作已稳定",
+                "importance": 3,
+            }
+        ]
+    }
+    await _apply_semantic_ops(
+        store,
+        "private",
+        "p:1",
+        parsed,
+        [{"id": insight_id, "memory_type": "insight"}],
+    )
+    rows = await store.get_scope_memories("private", "p:1")
+    assert len(rows) == 1
+    assert rows[0]["content"] == "用户工作已稳定"
+    assert rows[0]["memory_type"] == "insight"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_semantic_ops_expires_insight():
+    store = await _make_store()
+    insight_id = await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="insight",
+        content="已不再成立的洞察",
+    )
+    parsed = {"semantic_ops": [{"action": "expire", "target_id": insight_id}]}
+    await _apply_semantic_ops(
+        store,
+        "private",
+        "p:1",
+        parsed,
+        [{"id": insight_id, "memory_type": "insight"}],
+    )
+    assert await store.get_scope_memories("private", "p:1") == []
+    await store.close()
 
 
 @pytest.mark.asyncio

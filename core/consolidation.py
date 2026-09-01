@@ -53,6 +53,7 @@ _CONSOLIDATION_SYSTEM_PROMPT = """你是记忆巩固模块。请把用户消息�
    - ignore：一次性内容，直接不出现在输出里
    - 重复合并：若上方已有认知中存在多条表达同一事实的重复项，保留最完整的
      一条做 update，其余用 expire 删除，不要保留重复条目
+   - 带 [洞察] 标记的条目同样参与 update/expire：不再成立的洞察应改写或删除
 
    时间规则：涉及相对时间的表述（明天、下周、月底等）必须结合对话时间戳改写为绝对日期，
    事件型事实以 [YYYY-MM-DD] 开头，例如：用户 [2026-09-07] 前后去北京出差。
@@ -119,12 +120,12 @@ def _clean_memory_text(text: str, max_len: int = 200) -> str:
     return " ".join(str(text).split())[:max_len]
 
 
-def _format_semantic_block(semantic_memories: list[dict]) -> str:
-    lines = [
-        f"[#{m['id']}] {m['content']}"
-        for m in semantic_memories
-        if m["memory_type"] == "semantic"
-    ]
+def _format_semantic_block(structured_memories: list[dict]) -> str:
+    """既有语义记忆与洞察都进入巩固 prompt，模型才能对其 update/expire/去重"""
+    lines = []
+    for m in structured_memories:
+        marker = "[洞察] " if m["memory_type"] == "insight" else ""
+        lines.append(f"[#{m['id']}] {marker}{m['content']}")
     return "\n".join(lines) if lines else "（暂无）"
 
 
@@ -155,7 +156,7 @@ async def _consolidate_scope(
         raw_turns = await store.get_pending_raw(scope_type, scope_key, _BATCH_LIMIT)
         if not raw_turns:
             break
-        semantic = await store.get_semantic_memories(scope_type, scope_key)
+        structured = await store.get_semantic_memories(scope_type, scope_key)
 
         bridge_instruction = (
             _BRIDGE_INSTRUCTION_GROUP
@@ -164,7 +165,7 @@ async def _consolidate_scope(
         )
         prompt = _CONSOLIDATION_USER_TEMPLATE.format(
             today=time.strftime("%Y-%m-%d"),
-            semantic_block=_format_semantic_block(semantic),
+            semantic_block=_format_semantic_block(structured),
             raw_block=_format_raw_block(raw_turns),
         )
         raw = await call_background_llm(
@@ -182,7 +183,7 @@ async def _consolidate_scope(
         turn_map = {t["id"]: t for t in raw_turns}
         parsed = parse_json_object(raw)
         if isinstance(parsed, dict):
-            await _apply_semantic_ops(store, scope_type, scope_key, parsed, semantic)
+            await _apply_semantic_ops(store, scope_type, scope_key, parsed, structured)
             await _apply_insight(store, scope_type, scope_key, parsed)
             if scope_type == "group":
                 await _bridge_self_statements(
@@ -203,13 +204,13 @@ async def _apply_semantic_ops(
     scope_type: str,
     scope_key: str,
     parsed: dict,
-    semantic: list[dict],
+    structured: list[dict],
 ) -> None:
     ops = parsed.get("semantic_ops")
     if not isinstance(ops, list):
         return
-    # 只允许 update/expire 本 scope 的语义记忆，防止 LLM 幻觉 id 跨 scope 覆盖
-    semantic_ids = {m["id"] for m in semantic if m["memory_type"] == "semantic"}
+    # 只允许 update/expire 本 scope 的语义记忆/洞察，防止 LLM 幻觉 id 跨 scope 覆盖
+    structured_ids = {m["id"] for m in structured}
     for op in ops:
         if not isinstance(op, dict):
             continue
@@ -220,7 +221,7 @@ async def _apply_semantic_ops(
                 target_id = int(op.get("target_id"))
             except (TypeError, ValueError):
                 continue
-            if not content or target_id not in semantic_ids:
+            if not content or target_id not in structured_ids:
                 logger.debug(f"[Memoir] 忽略非法巩固 update: target_id={target_id}")
                 continue
             importance = op.get("importance")
@@ -234,7 +235,7 @@ async def _apply_semantic_ops(
                 target_id = int(op.get("target_id"))
             except (TypeError, ValueError):
                 continue
-            if target_id not in semantic_ids:
+            if target_id not in structured_ids:
                 logger.debug(f"[Memoir] 忽略非法巩固 expire: target_id={target_id}")
                 continue
             await store.delete_memory_in_scope(target_id, scope_type, scope_key)
