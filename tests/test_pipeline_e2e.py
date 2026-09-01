@@ -286,6 +286,32 @@ async def test_private_recall_skips_turns_already_in_context():
     await store.close()
 
 
+@pytest.mark.asyncio
+async def test_private_recall_counts_rounds_by_user_role():
+    """可见轮次数按 user 消息数计：非成对上下文（工具消息等）不破坏排除"""
+    store = await _make_store()
+    handler = EventHandler(None, dict(BASE_CONFIG), store)
+    for text in ("第一次提到烤鸭", "第二次提到故宫", "第三次提到长城"):
+        await handler.on_llm_response(make_event(text), make_resp("好的"))
+
+    # 3 个 user 轮次（夹杂 tool 消息，总条数 5）：3 轮原文都应被排除；
+    # 旧逻辑按 len//2 只排除 2 条，最近一轮「长城」会被错误地重复注入
+    req = ProviderRequest(
+        prompt="长城好玩吗",
+        contexts=[
+            {"role": "user", "content": "第一次提到烤鸭"},
+            {"role": "assistant", "content": "好的"},
+            {"role": "tool", "content": "工具结果"},
+            {"role": "user", "content": "第二次提到故宫"},
+            {"role": "assistant", "content": "好的"},
+            {"role": "user", "content": "第三次提到长城"},
+        ],
+    )
+    await handler.on_llm_request(make_event("长城好玩吗"), req)
+    assert injected_text(req) == ""
+    await store.close()
+
+
 # ==================== group chat: capture, subject, bridge ====================
 
 

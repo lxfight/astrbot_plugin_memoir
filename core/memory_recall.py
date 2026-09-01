@@ -267,11 +267,22 @@ async def handle_recall(
         )
         if cued:
             await store.reinforce_memories([m["id"] for m in cued])
-        # 私聊：req.contexts 即模型当前可见的会话历史（每轮对话对应一条原文），
+        # 私聊：req.contexts 即模型当前可见的会话历史（OpenAI 格式 dict 列表），
         # 其中的轮次不再重复召回，线索层只检索更早的原文——否则上下文线索
         # 扩展取自最近原文，必然命中这些原文本身，注入等于浪费 token；
         # 群聊本就没有会话历史，近因层另行为其补充。
-        exclude_recent = len(req.contexts) // 2 if scope_type == "private" else 0
+        # 可见轮次数按 user 消息数计（每轮一条），比假定 user/assistant
+        # 严格成对更稳健：存在工具消息等非成对条目时仍正确。
+        exclude_recent = (
+            sum(
+                1
+                for m in (req.contexts or [])
+                if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None))
+                == "user"
+            )
+            if scope_type == "private"
+            else 0
+        )
         cued_raw = await store.search_raw(
             scope.scope_type,
             scope.scope_key,
