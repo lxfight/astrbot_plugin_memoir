@@ -1,6 +1,6 @@
 name: astrbot_plugin_memoir
 author: lxfight
 desc: 模拟人脑记忆闭环（编码-巩固-遗忘-召回-洞察）的长期记忆插件，无向量检索
-version: 0.1.0
+version: 0.3.0
 repo: https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_memoir
 support_platforms: []
