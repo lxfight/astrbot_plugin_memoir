@@ -188,7 +188,15 @@ async def _consolidate_scope(
                 break
             logger.warning("[Memoir] 巩固输出无法解析为 JSON，重试一次")
         else:
-            logger.warning("[Memoir] 巩固输出连续两次无法解析，本批轮次仅标记已处理")
+            # 放弃前留档：本批轮次即将标记已处理并最终被 TTL 清理，
+            # 没有这份记录的话整批抽取内容就永久静默丢失了
+            logger.warning(
+                f"[Memoir] 巩固输出连续两次无法解析，本批 {len(raw_turns)} 轮"
+                "仅标记已处理，失败详情已留档 consolidation_failures"
+            )
+            await store.record_consolidation_failure(
+                scope_type, scope_key, [t["id"] for t in raw_turns], raw
+            )
 
         turn_map = {t["id"]: t for t in raw_turns}
         if isinstance(parsed, dict):

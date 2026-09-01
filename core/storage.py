@@ -89,6 +89,18 @@ CREATE TABLE IF NOT EXISTS scope_configs (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (scope_type, scope_key)
 );
+
+-- 巩固抽取失败的备份：LLM 输出连续无法解析时，本批轮次仍会标记已处理，
+-- 抽取内容随之静默丢失；此处留存轮次 id 与原始输出供事后排查/人工恢复。
+-- 原始轮次在 raw_turns 中保留至 TTL 清理，turn_ids 可用于定位或重放。
+CREATE TABLE IF NOT EXISTS consolidation_failures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope_type TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    turn_ids TEXT NOT NULL,
+    llm_output TEXT,
+    created_at INTEGER NOT NULL
+);
 """
 
 
@@ -325,6 +337,43 @@ class MemoryStore:
         await self.connection.execute(
             f"UPDATE raw_turns SET extracted = 1 WHERE id IN ({placeholders})",
             turn_ids,
+        )
+        await self.connection.commit()
+
+    async def record_consolidation_failure(
+        self,
+        scope_type: str,
+        scope_key: str,
+        turn_ids: list[int],
+        llm_output: str | None,
+    ) -> None:
+        """留存一次抽取失败的批信息，给"静默丢失"留恢复路径。
+
+        调用时机：LLM 输出连续两次无法解析为 JSON，本批轮次即将被标记
+        extracted=1 并最终按 TTL/容量清理。若不留痕，这批对话将永远
+        不会进入语义记忆且无从发现。恢复方式：依据 turn_ids 从
+        raw_turns（TTL 内）取回原文，或将 llm_output 人工解析后补录。
+
+        Args:
+            scope_type: 会话类型（private/group）。
+            scope_key: 会话标识。
+            turn_ids: 本批原始轮次 id 列表。
+            llm_output: 最后一次无法解析的模型输出。
+        """
+        if self.connection is None:
+            return
+        await self.connection.execute(
+            """
+            INSERT INTO consolidation_failures (scope_type, scope_key, turn_ids, llm_output, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                scope_type,
+                scope_key,
+                json.dumps(turn_ids),
+                llm_output,
+                int(time.time()),
+            ),
         )
         await self.connection.commit()
 

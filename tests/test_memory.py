@@ -5,12 +5,15 @@ cue extraction, LIKE-based relevance ranking, recall reinforcement vs
 decay interaction, semantic capacity pruning, and LLM op validation.
 """
 
+import json
 import time
 
 import pytest
+from core import consolidation as consolidation_module
 from core.consolidation import (
     _apply_insight,
     _apply_semantic_ops,
+    _consolidate_scope,
     _format_semantic_block,
 )
 from core.memory_recall import extract_terms
@@ -482,4 +485,61 @@ async def test_apply_insight_inserts_insight():
     rows = await store.get_scope_memories("private", "p:1")
     assert rows[0]["memory_type"] == "insight"
     assert rows[0]["importance"] == 4
+    await store.close()
+
+
+# ==================== consolidation failure backup ====================
+
+
+@pytest.mark.asyncio
+async def test_consolidation_parse_failure_backs_up_batch(monkeypatch):
+    store = await _make_store()
+    turn_a = await store.insert_raw_turn(
+        scope_type="private", scope_key="p:1", content="用户提到下周去北京出差"
+    )
+    turn_b = await store.insert_raw_turn(
+        scope_type="private", scope_key="p:1", content="用户说会带特产回来"
+    )
+
+    async def fake_llm(context, config, *, prompt, system_prompt, event=None):
+        return "抱歉，这不是 JSON"
+
+    monkeypatch.setattr(consolidation_module, "call_background_llm", fake_llm)
+    await _consolidate_scope(None, {}, store, "private", "p:1")
+
+    # 轮次照常推进水位（不无限重试卡死），但失败批已留档
+    rows, _ = await store.get_raw_turns("private", "p:1")
+    assert all(r["extracted"] == 1 for r in rows)
+    assert await store.get_scope_memories("private", "p:1") == []
+    async with store.connection.execute(
+        "SELECT scope_type, scope_key, turn_ids, llm_output FROM consolidation_failures"
+    ) as cursor:
+        failures = [dict(r) for r in await cursor.fetchall()]
+    assert len(failures) == 1
+    assert failures[0]["scope_key"] == "p:1"
+    assert json.loads(failures[0]["turn_ids"]) == [turn_a, turn_b]
+    assert failures[0]["llm_output"] == "抱歉，这不是 JSON"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_consolidation_llm_failure_keeps_pending(monkeypatch):
+    store = await _make_store()
+    await store.insert_raw_turn(
+        scope_type="private", scope_key="p:1", content="用户提到下周去北京出差"
+    )
+
+    async def fake_llm(context, config, *, prompt, system_prompt, event=None):
+        return None
+
+    monkeypatch.setattr(consolidation_module, "call_background_llm", fake_llm)
+    await _consolidate_scope(None, {}, store, "private", "p:1")
+
+    # 模型调用失败：不推进水位，留待下轮，也不产生失败留档
+    activity = await store.get_scope_activity()
+    assert activity[0]["pending"] == 1
+    async with store.connection.execute(
+        "SELECT COUNT(*) AS n FROM consolidation_failures"
+    ) as cursor:
+        assert (await cursor.fetchone())["n"] == 0
     await store.close()
