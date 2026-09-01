@@ -173,13 +173,13 @@ class MemoirPlugin(Star):
 
     @filter.custom_filter(PassiveGroupCaptureFilter, False)
     async def on_group_passive(self, event: AstrMessageEvent) -> None:
-        """被动捕获所有群消息用于落库；filter 始终返回 False，不唤醒机器人。"""
-        if not self._initialized or self.event_handler is None:
-            return
-        try:
-            await self.event_handler.on_group_message(event)
-        except Exception as exc:
-            logger.warning(f"[Memoir] 群消息捕获失败（不影响主流程）: {exc}")
+        """Filter carrier only; this body never runs.
+
+        PassiveGroupCaptureFilter performs the capture as a side effect
+        during the waking-check stage and always returns False, so this
+        handler is never activated. It exists solely so the filter gets
+        registered with the event bus.
+        """
 
     def submit_group_capture(self, event: AstrMessageEvent) -> None:
         """被动捕获的群消息：创建被跟踪的落库任务，terminate 时统一取消"""
