@@ -170,20 +170,27 @@ async def _consolidate_scope(
             semantic_block=_format_semantic_block(structured),
             raw_block=_format_raw_block(raw_turns),
         )
-        raw = await call_background_llm(
-            context,
-            config,
-            prompt=prompt,
-            system_prompt=_CONSOLIDATION_SYSTEM_PROMPT.format(
-                bridge_instruction=bridge_instruction
-            ),
+        system_prompt = _CONSOLIDATION_SYSTEM_PROMPT.format(
+            bridge_instruction=bridge_instruction
         )
-        if raw is None:
-            # LLM 调用失败：不标记已抽取，留待下轮重试；停止继续消化
-            return
+        # 坏输出重试一次再推进水位：解析失败立即放行会静默丢失整批抽取，
+        # 无限重试会卡死水位，单次重试是两者的折中
+        parsed = None
+        for _attempt in range(2):
+            raw = await call_background_llm(
+                context, config, prompt=prompt, system_prompt=system_prompt
+            )
+            if raw is None:
+                # LLM 调用失败：不标记已抽取，留待下轮重试；停止继续消化
+                return
+            parsed = parse_json_object(raw)
+            if isinstance(parsed, dict):
+                break
+            logger.warning("[Memoir] 巩固输出无法解析为 JSON，重试一次")
+        else:
+            logger.warning("[Memoir] 巩固输出连续两次无法解析，本批轮次仅标记已处理")
 
         turn_map = {t["id"]: t for t in raw_turns}
-        parsed = parse_json_object(raw)
         if isinstance(parsed, dict):
             await _apply_semantic_ops(store, scope_type, scope_key, parsed, structured)
             await _apply_insight(store, scope_type, scope_key, parsed)
@@ -191,8 +198,6 @@ async def _consolidate_scope(
                 await _bridge_self_statements(
                     config, store, scope_key, parsed, turn_map
                 )
-        else:
-            logger.warning("[Memoir] 巩固输出无法解析为 JSON，本批轮次仅标记已处理")
 
         # 无论抽取结果如何，只要 LLM 成功响应就推进水位，避免同一批坏输出无限重试
         await store.mark_raw_extracted([t["id"] for t in raw_turns])
