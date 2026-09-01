@@ -563,3 +563,34 @@ async def test_consolidation_llm_failure_keeps_pending(monkeypatch):
     ) as cursor:
         assert (await cursor.fetchone())["n"] == 0
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_consolidation_batch_respects_char_budget(monkeypatch):
+    """单批超过字符预算的轮次不进 prompt，留待后续批次（水位安全）"""
+    store = await _make_store()
+    prompts: list[str] = []
+
+    async def fake_llm(context, config, *, prompt, system_prompt, event=None):
+        prompts.append(prompt)
+        return '{"semantic_ops": [], "insight": null}'
+
+    monkeypatch.setattr(consolidation_module, "call_background_llm", fake_llm)
+    monkeypatch.setattr(consolidation_module, "_BATCH_CHAR_BUDGET", 10)
+    for i in range(4):
+        await store.insert_raw_turn(
+            scope_type="private", scope_key="p:1", content=f"第{i}轮 很长的对话内容"
+        )
+
+    await _consolidate_scope(None, {}, store, "private", "p:1")
+
+    # 每批预算只装得下 1 条：本次 pass 消化 3 批（_MAX_BATCHES_PER_PASS），
+    # 每批 prompt 只含 1 条轮次，剩余 1 条仍 pending
+    assert len(prompts) == 3
+    for prompt in prompts:
+        assert prompt.count("很长的对话内容") == 1
+    assert "第0轮" in prompts[0]
+    assert "第1轮" not in prompts[0]
+    activity = await store.get_scope_activity()
+    assert activity[0]["pending"] == 1
+    await store.close()

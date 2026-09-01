@@ -31,6 +31,11 @@ from .storage import MemoryStore
 _BATCH_LIMIT = 60
 _MAX_BATCHES_PER_PASS = 3
 _RAW_CAP_PER_SCOPE = 500
+# 单批原始轮次的总字符预算：轮次条数上限之外的第二道约束。
+# 每条轮次可存 2000 字符，60 条极端情况下可达 12 万字符，远超小模型
+# 上下文；超出预算的轮次留在队列中由后续批次消化（未标记 extracted，
+# 水位安全）。语义块已由 _SEMANTIC_CAP_PER_SCOPE×200 字符约束，不在此限。
+_BATCH_CHAR_BUDGET = 30000
 # 结构化记忆单 scope 容量上限：衰减只影响排序不删除，expire 依赖 LLM 判断，
 # 没有硬上限的话重复/过时认知会无限累积并撑大巩固 prompt
 _SEMANTIC_CAP_PER_SCOPE = 200
@@ -158,6 +163,17 @@ async def _consolidate_scope(
         raw_turns = await store.get_pending_raw(scope_type, scope_key, _BATCH_LIMIT)
         if not raw_turns:
             break
+        # 按字符预算截批（保持时间连续性，从最早开始取）：超出预算的轮次
+        # 不进本批，留待后续批次消化；至少保留一条避免单条超长时卡死
+        kept: list[dict] = []
+        batch_chars = 0
+        for turn in raw_turns:
+            turn_chars = len(turn["content"] or "")
+            if kept and batch_chars + turn_chars > _BATCH_CHAR_BUDGET:
+                break
+            kept.append(turn)
+            batch_chars += turn_chars
+        raw_turns = kept
         structured = await store.get_semantic_memories(
             scope_type, scope_key, _SEMANTIC_CAP_PER_SCOPE
         )
