@@ -351,12 +351,15 @@ class MemoryStore:
         scope_key: str,
         query_terms: list[str],
         top_k: int = 5,
+        boost_subject: str | None = None,
     ) -> list[dict[str, Any]]:
         """子串匹配检索 + 相关性评分排序（不使用向量相似度，也不依赖 FTS5 分词）。
 
         用当前用户发言的关键线索对记忆的 content/tags 做子串命中。
         相关性 = 1 + content 命中线索数 + 2×tags 命中线索数，tags 加权是因为
         tags 由 LLM 归一化生成，是跨措辞同义匹配（"出差"vs"去北京"）的桥梁。
+        boost_subject 非空时，subject 与其一致（群聊中关于当前发言人）的记忆
+        额外加 2 分：群聊是整群共享记忆池，提问者相关的事实更可能被需要。
         排序：相关性 > 类型（洞察>语义>情景）> strength > importance。
         WHERE 条件保证每条结果至少命中一个线索。
         """
@@ -370,13 +373,16 @@ class MemoryStore:
             for t in terms
         ]
         content_hits = " + ".join(["(content LIKE ? ESCAPE '\\')"] * len(terms))
-        tag_hits = " + ".join(["(tags LIKE ? ESCAPE '\\')"] * len(terms))
+        # tags 可能为 NULL（未生成 tags 的记忆），NULL LIKE 结果为 NULL 会把整条
+        # 相关性拖成 NULL，必须按 0 参与计算
+        tag_hits = " + ".join(["(IFNULL(tags LIKE ? ESCAPE '\\', 0))"] * len(terms))
         where_clause = " OR ".join(
             ["(content LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"] * len(terms)
         )
+        subject_boost = "(CASE WHEN subject = ? THEN 2 ELSE 0 END)"
         sql = f"""
             SELECT *,
-                (1 + ({content_hits}) + 2 * ({tag_hits})) AS relevance
+                (1 + ({content_hits}) + 2 * ({tag_hits}) + {subject_boost}) AS relevance
             FROM memories
             WHERE ({where_clause}) AND scope_type = ? AND scope_key = ?
             ORDER BY
@@ -391,6 +397,7 @@ class MemoryStore:
         params: list[Any] = []
         params.extend(likes)  # content_hits
         params.extend(likes)  # tag_hits
+        params.append(boost_subject or "")  # subject_boost（空串不匹配任何 subject）
         for like in likes:  # where OR pairs
             params.extend([like, like])
         params.extend([scope_type, scope_key, top_k])

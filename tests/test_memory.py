@@ -8,7 +8,6 @@ decay interaction, semantic capacity pruning, and LLM op validation.
 import time
 
 import pytest
-
 from core.consolidation import (
     _apply_insight,
     _apply_semantic_ops,
@@ -16,7 +15,6 @@ from core.consolidation import (
 )
 from core.memory_recall import extract_terms
 from core.storage import MemoryStore
-
 
 # ==================== extract_terms ====================
 
@@ -143,6 +141,36 @@ async def test_search_scoped_isolation():
         tags="北京",
     )
     assert await store.search_memories("private", "p:2", ["北京"], top_k=5) == []
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_search_boosts_subject_matching_speaker():
+    store = await _make_store()
+    # 群聊记忆池：两条记忆线索命中数相同，关于当前发言人的应排前
+    first_id = await store.insert_memory(
+        scope_type="group",
+        scope_key="g:1",
+        memory_type="semantic",
+        content="张三想去北京旅游",
+        subject="张三",
+    )
+    await store.insert_memory(
+        scope_type="group",
+        scope_key="g:1",
+        memory_type="semantic",
+        content="李四住在北京",
+        subject="李四",
+    )
+    # 错开 updated_at，保证不加权时按时间倒序的基线排序稳定
+    await _backdate_memory(store, first_id, 0.01)
+    hits = await store.search_memories(
+        "group", "g:1", ["北京"], top_k=2, boost_subject="张三"
+    )
+    assert hits[0]["subject"] == "张三"
+    # 不加权时保持原排序（updated_at 倒序，后插入的李四在前）
+    hits = await store.search_memories("group", "g:1", ["北京"], top_k=2)
+    assert hits[0]["subject"] == "李四"
     await store.close()
 
 

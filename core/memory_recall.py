@@ -258,7 +258,12 @@ async def handle_recall(
     cued_raw: list[dict] = []
     if terms:
         cued = await store.search_memories(
-            scope.scope_type, scope.scope_key, terms, int(config.get("recall_top_k", 5))
+            scope.scope_type,
+            scope.scope_key,
+            terms,
+            int(config.get("recall_top_k", 5)),
+            # 群聊整群共享记忆池：关于当前发言人的记忆更可能被需要
+            boost_subject=event.get_sender_name() if scope_type == "group" else None,
         )
         if cued:
             await store.reinforce_memories([m["id"] for m in cued])
