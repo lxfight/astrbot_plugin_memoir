@@ -27,6 +27,9 @@ from .storage import MemoryStore
 _BATCH_LIMIT = 60
 _MAX_BATCHES_PER_PASS = 3
 _RAW_CAP_PER_SCOPE = 500
+# 结构化记忆单 scope 容量上限：衰减只影响排序不删除，expire 依赖 LLM 判断，
+# 没有硬上限的话重复/过时认知会无限累积并撑大巩固 prompt
+_SEMANTIC_CAP_PER_SCOPE = 200
 
 _PROMPT_TEMPLATE = """你是记忆巩固模块。今天是 {today}。下面是一段会话最近的原始对话记录，以及当前已沉淀的稳定认知。
 
@@ -45,6 +48,8 @@ _PROMPT_TEMPLATE = """你是记忆巩固模块。今天是 {today}。下面是�
    - expire：某条已有认知记录的时效性事件已经过期失效（出差已结束、约定已完成、
      状态已再度变化且旧值无保留价值），删除它（target_id 必须来自上方 [#id]）
    - ignore：一次性内容，直接不出现在输出里
+   - 重复合并：若上方已有认知中存在多条表达同一事实的重复项，保留最完整的
+     一条做 update，其余用 expire 删除，不要保留重复条目
 
    时间规则：涉及相对时间的表述（明天、下周、月底等）必须结合对话时间戳改写为绝对日期，
    事件型事实以 [YYYY-MM-DD] 开头，例如：用户 [2026-09-07] 前后去北京出差。
@@ -155,6 +160,7 @@ async def _consolidate_scope(
         # 无论抽取结果如何，只要 LLM 成功响应就推进水位，避免同一批坏输出无限重试
         await store.mark_raw_extracted([t["id"] for t in raw_turns])
         await store.cap_raw(scope_type, scope_key, _RAW_CAP_PER_SCOPE)
+        await store.prune_semantic(scope_type, scope_key, _SEMANTIC_CAP_PER_SCOPE)
         await store.mark_scope_consolidated(scope_type, scope_key)
 
 

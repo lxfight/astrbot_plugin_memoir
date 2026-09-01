@@ -502,6 +502,40 @@ class MemoryStore:
         await self.connection.commit()
         return cursor.rowcount or 0
 
+    async def prune_semantic(self, scope_type: str, scope_key: str, cap: int) -> int:
+        """结构化记忆容量裁剪：超出 cap 时按召回优先级淘汰，返回删除条数。
+
+        与 raw_turns 的容量裁剪对应；淘汰排序与召回一致（importance×strength，
+        久未更新者靠后），保证被删除的是最不可能被召回的记忆。
+
+        Args:
+            scope_type: 会话类型（private/group）。
+            scope_key: 会话标识。
+            cap: 保留的结构化记忆条数上限。
+
+        Returns:
+            本次删除的条数。
+        """
+        if self.connection is None:
+            return 0
+        cursor = await self.connection.execute(
+            """
+            DELETE FROM memories
+            WHERE scope_type = ? AND scope_key = ?
+              AND memory_type IN ('semantic', 'insight')
+              AND id NOT IN (
+                  SELECT id FROM memories
+                  WHERE scope_type = ? AND scope_key = ?
+                    AND memory_type IN ('semantic', 'insight')
+                  ORDER BY importance * strength DESC, updated_at DESC
+                  LIMIT ?
+              )
+            """,
+            (scope_type, scope_key, scope_type, scope_key, cap),
+        )
+        await self.connection.commit()
+        return cursor.rowcount or 0
+
     async def get_scope_memories(
         self, scope_type: str, scope_key: str, limit: int = 10, offset: int = 0
     ) -> list[dict[str, Any]]:
