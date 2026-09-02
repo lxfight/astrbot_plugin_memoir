@@ -475,6 +475,143 @@ def test_format_semantic_block_includes_insights():
     assert "[#2] [洞察] 用户工作变动频繁" in block
 
 
+def test_format_semantic_block_shows_key():
+    block = _format_semantic_block(
+        [
+            {
+                "id": 7,
+                "memory_type": "semantic",
+                "memory_key": "user:job",
+                "content": "用户是程序员",
+            }
+        ]
+    )
+    assert "[#7] [user:job] 用户是程序员" in block
+
+
+@pytest.mark.asyncio
+async def test_consolidation_related_recall_narrows_prompt(monkeypatch):
+    """巩固前只召回相关旧记忆：相关条目带 key 进 prompt，无关条目被排除"""
+    store = await _make_store()
+    shiba_id = await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="用户养了一只柴犬，名叫小福",
+        memory_key="pet:shiba",
+        tags="柴犬,小狗,宠物",
+    )
+    await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="用户喜欢爵士乐",
+        memory_key="user:music",
+    )
+    await store.insert_raw_turn(
+        scope_type="private", scope_key="p:1", content="我家的柴犬最近老是掉毛"
+    )
+    prompts: list[str] = []
+
+    async def fake_llm(context, config, *, prompt, system_prompt, event=None):
+        prompts.append(prompt)
+        return json.dumps(
+            {
+                "semantic_ops": [
+                    {
+                        "action": "update",
+                        "target_id": shiba_id,
+                        "content": "用户养的柴犬小福最近掉毛严重",
+                    }
+                ],
+                "insight": None,
+            }
+        )
+
+    monkeypatch.setattr(consolidation_module, "call_background_llm", fake_llm)
+    await _consolidate_scope(None, {}, store, "private", "p:1")
+
+    assert f"[#{shiba_id}] [pet:shiba] 用户养了一只柴犬" in prompts[0]
+    assert "爵士乐" not in prompts[0]
+    shiba = next(
+        r
+        for r in await store.get_scope_memories("private", "p:1")
+        if r["id"] == shiba_id
+    )
+    assert shiba["content"] == "用户养的柴犬小福最近掉毛严重"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_semantic_ops_insert_with_key_merges():
+    """insert 撞既有 key 时存储层自动转更新，不产生重复条目"""
+    store = await _make_store()
+    existing_id = await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="用户在北京工作",
+        memory_key="user:job",
+        tags="工作,北京",
+    )
+    parsed = {
+        "semantic_ops": [
+            {
+                "action": "insert",
+                "key": "user:job",
+                "content": "用户已跳槽到上海的公司",
+                "tags": "工作,上海",
+                "importance": 4,
+            }
+        ]
+    }
+    await _apply_semantic_ops(
+        store,
+        "private",
+        "p:1",
+        parsed,
+        [{"id": existing_id, "memory_type": "semantic", "memory_key": "user:job"}],
+    )
+    rows = await store.get_scope_memories("private", "p:1")
+    assert len(rows) == 1
+    assert rows[0]["id"] == existing_id
+    assert rows[0]["content"] == "用户已跳槽到上海的公司"
+    assert rows[0]["memory_key"] == "user:job"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_semantic_ops_update_backfills_key():
+    """update 携带 key 时给无 key 的旧条目回填唯一索引"""
+    store = await _make_store()
+    legacy_id = await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="用户喜欢徒步",
+    )
+    await _apply_semantic_ops(
+        store,
+        "private",
+        "p:1",
+        {
+            "semantic_ops": [
+                {
+                    "action": "update",
+                    "target_id": legacy_id,
+                    "content": "用户喜欢徒步和露营",
+                    "key": "user:hobby",
+                }
+            ]
+        },
+        [{"id": legacy_id, "memory_type": "semantic"}],
+    )
+    rows = await store.get_scope_memories("private", "p:1")
+    assert rows[0]["memory_key"] == "user:hobby"
+    assert rows[0]["content"] == "用户喜欢徒步和露营"
+    await store.close()
+
+
 @pytest.mark.asyncio
 async def test_apply_semantic_ops_updates_insight():
     store = await _make_store()

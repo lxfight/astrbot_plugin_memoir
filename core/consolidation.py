@@ -5,9 +5,11 @@
 所以巩固必须是主动扫描所有 scope 的独立任务，模拟"离线巩固"。
 
 与旧版本（逐轮 LLM 编码 + 周期升华）不同，现在每个 scope 每次触发只用
-一次 LLM 调用：把未处理的原始对话轮次与已有语义记忆一起交给模型，
-一次性完成 提炼（update/insert/expire，含时间归一化与过期事实清理）
-+ 洞察 + 群聊自我陈述桥接；积压时最多连续消化 3 批。
+一次 LLM 调用：先按本批原文线索召回相关的旧记忆，再连同未处理的原始
+轮次一起交给模型，一次性完成 提炼（update/insert/expire，含时间归一化
+与过期事实清理）+ 洞察 + 群聊自我陈述桥接；积压时最多连续消化 3 批。
+insert 强制携带 memory_key（同类:主题 slug），与既有 key 撞车时存储层
+自动转更新，硬性防止同一事实重复建条。
 原始轮次本身的遗忘由 prune_raw 按 TTL + 容量上限处理。
 
 提示注入收窄：巩固指令放 system prompt，对话数据放 user prompt，
@@ -23,6 +25,7 @@ import time
 from astrbot.api import logger
 
 from .llm_helper import call_background_llm, parse_json_object
+from .memory_recall import extract_terms
 from .scope import merge_scope_config, private_scope_key
 from .storage import MemoryStore
 
@@ -39,6 +42,10 @@ _BATCH_CHAR_BUDGET = 30000
 # 结构化记忆单 scope 容量上限：衰减只影响排序不删除，expire 依赖 LLM 判断，
 # 没有硬上限的话重复/过时认知会无限累积并撑大巩固 prompt
 _SEMANTIC_CAP_PER_SCOPE = 200
+
+# 本批原文最多提取的检索线索数：与召回层同一套 bigram 线索，
+# 用于在巩固前检索相关旧记忆
+_BATCH_TERM_LIMIT = 24
 
 # 巩固指令与数据分离：指令放 system prompt，对话数据放 user prompt，
 # 并在指令中显式声明数据区出现的"指令式文字"一律视为普通聊天内容，
@@ -63,6 +70,14 @@ _CONSOLIDATION_SYSTEM_PROMPT = """你是记忆巩固模块。请把用户消息�
      （仅措辞、细节或时间不同），改用 update 合并进那条已有认知，不要插入重复条目
    - 带 [洞察] 标记的条目同样参与 update/expire：不再成立的洞察应改写或删除
 
+   key 规则（key 是「关于什么事」的唯一标识，用于防止同一事实重复建条）：
+   - insert 必须携带 key，格式为 类别:主题（小写英文 slug），如 user:job、pet:dog、
+     event:2026-09-07:beijing-trip；同一事实永远对应同一个 key
+   - 上方已有记忆中带 [key] 的条目就是该事实的既有 key：内容变化时必须用
+     update（target_id 指向该条目），禁止为同一事实另造新 key 去 insert
+   - update 可选携带 key：仅当目标条目上方未显示 [key]（旧数据）时用于回填，
+     值须与该条目表达的事实一致
+
    时间规则：涉及相对时间的表述（明天、下周、月底等）必须结合对话时间戳改写为绝对日期，
    事件型事实以 [YYYY-MM-DD] 开头，例如：用户 [2026-09-07] 前后去北京出差。
    tags 用逗号分隔，除核心关键词外必须补充口语同义表达和上位词，
@@ -74,8 +89,8 @@ _CONSOLIDATION_SYSTEM_PROMPT = """你是记忆巩固模块。请把用户消息�
 
 {{
   "semantic_ops": [
-    {{"action": "update", "target_id": 12, "content": "新的认知内容", "tags": "主题变化时给出新关键词，可选", "importance": 1-5}},
-    {{"action": "insert", "content": "[YYYY-MM-DD] 新的认知内容", "tags": "关键词,同义表达,上位词", "subject": "事实所属的说话人名字，群聊必填，私聊填 null", "importance": 1-5}},
+    {{"action": "update", "target_id": 12, "content": "新的认知内容", "key": "目标条目无 key 时回填，可选", "tags": "主题变化时给出新关键词，可选", "importance": 1-5}},
+    {{"action": "insert", "key": "user:job", "content": "[YYYY-MM-DD] 新的认知内容", "tags": "关键词,同义表达,上位词", "subject": "事实所属的说话人名字，群聊必填，私聊填 null", "importance": 1-5}},
     {{"action": "expire", "target_id": 12}}
   ],
   "insight": {{"content": "洞察内容", "importance": 1-5}} 或 null,
@@ -87,7 +102,7 @@ _CONSOLIDATION_SYSTEM_PROMPT = """你是记忆巩固模块。请把用户消息�
 
 _CONSOLIDATION_USER_TEMPLATE = """今天是 {today}。
 
-已有的稳定认知：
+与本批对话可能相关的已有记忆（[#id] 为条目 id，[key] 为唯一标识，可对其 update/expire）：
 {semantic_block}
 
 最近的对话记录（每条开头方括号内是发生时间）：
@@ -129,12 +144,58 @@ def _clean_memory_text(text: str, max_len: int = 200) -> str:
 
 
 def _format_semantic_block(structured_memories: list[dict]) -> str:
-    """既有语义记忆与洞察都进入巩固 prompt，模型才能对其 update/expire/去重"""
+    """进入巩固 prompt 的既有记忆块，模型才能对其 update/expire/去重。
+
+    semantic 条目附带 [key]（唯一索引），模型据此复用 key 做合并决策；
+    旧数据没有 key 时不显示，由模型在 update 时顺带回填。
+    """
     lines = []
     for m in structured_memories:
         marker = "[洞察] " if m["memory_type"] == "insight" else ""
-        lines.append(f"[#{m['id']}] {marker}{m['content']}")
+        key = f" [{m['memory_key']}]" if m.get("memory_key") else ""
+        lines.append(f"[#{m['id']}]{key} {marker}{m['content']}")
     return "\n".join(lines) if lines else "（暂无）"
+
+
+async def _get_related_memories(
+    store: MemoryStore,
+    scope_type: str,
+    scope_key: str,
+    raw_turns: list[dict],
+    config: dict,
+) -> list[dict]:
+    """巩固前召回与本批原文可能相关的旧记忆，收窄模型决策的可见范围。
+
+    用本批原文的检索线索（与召回层同一套 extract_terms）做子串检索，
+    只把相关旧记忆交给模型做 update/insert/expire 决策，使 prompt 成本
+    与记忆总量解耦（替代旧版的全量注入）。线索没有命中时回退到最近
+    更新的记忆，保证模型至少能看到当前的稳定认知用于合并判断。
+
+    Args:
+        store: 记忆存储实例。
+        scope_type: 会话类型（private/group）。
+        scope_key: 会话标识。
+        raw_turns: 本批待抽取的原始轮次。
+        config: 合并会话覆盖后的生效配置。
+
+    Returns:
+        交给模型的既有记忆列表（semantic/insight）。
+    """
+    top_k = int(config.get("consolidation_related_top_k", 20))
+    terms: list[str] = []
+    for turn in raw_turns:
+        for term in extract_terms(turn["content"] or "", max_terms=_BATCH_TERM_LIMIT):
+            if term not in terms:
+                terms.append(term)
+            if len(terms) >= _BATCH_TERM_LIMIT:
+                break
+        if len(terms) >= _BATCH_TERM_LIMIT:
+            break
+    if terms:
+        related = await store.search_memories(scope_type, scope_key, terms, top_k)
+        if related:
+            return related
+    return await store.get_semantic_memories(scope_type, scope_key, top_k)
 
 
 def _format_raw_block(raw_turns: list[dict]) -> str:
@@ -175,8 +236,8 @@ async def _consolidate_scope(
             kept.append(turn)
             batch_chars += turn_chars
         raw_turns = kept
-        structured = await store.get_semantic_memories(
-            scope_type, scope_key, _SEMANTIC_CAP_PER_SCOPE
+        structured = await _get_related_memories(
+            store, scope_type, scope_key, raw_turns, config
         )
 
         bridge_instruction = (
@@ -265,7 +326,11 @@ async def _apply_semantic_ops(
                 importance = None
             # tags 缺省时保持旧值；内容主题变化时由模型给出新 tags
             tags = _clean_memory_text(op.get("tags") or "", max_len=200) or None
-            await store.update_memory_content(target_id, content, importance, tags)
+            # key 可选：仅用于给无 key 的旧条目回填（存储层会校验占用冲突）
+            memory_key = _clean_memory_text(op.get("key") or "", max_len=100) or None
+            await store.update_memory_content(
+                target_id, content, importance, tags, memory_key
+            )
         elif kind == "expire":
             try:
                 target_id = int(op.get("target_id"))
@@ -289,6 +354,8 @@ async def _apply_semantic_ops(
                 scope_key=scope_key,
                 memory_type="semantic",
                 content=content,
+                # 撞已有 key 时存储层自动转更新，硬性保证同事实不重复建条
+                memory_key=_clean_memory_text(op.get("key") or "", max_len=100) or None,
                 subject=subject,
                 tags=_clean_memory_text(op.get("tags") or "", max_len=200),
                 importance=importance,

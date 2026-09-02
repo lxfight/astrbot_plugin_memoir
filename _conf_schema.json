@@ -43,6 +43,12 @@
     "hint": "距上次巩固超过该时长，且存在未处理的新记忆时，即使未达数量阈值也会触发巩固；可在 WebUI 中按会话覆盖",
     "default": 12
   },
+  "consolidation_related_top_k": {
+    "description": "巩固时注入的相关旧记忆条数",
+    "type": "int",
+    "hint": "每次批量抽取前，先用本批原文线索检索相关旧记忆供模型决策更新/新建（替代全量注入，prompt 成本与记忆总量解耦）；未命中时回退注入最近更新的记忆；0 表示不注入旧记忆",
+    "default": 20
+  },
   "recall_top_k": {
     "description": "单次召回注入的记忆条数上限",
     "type": "int",

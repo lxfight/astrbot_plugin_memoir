@@ -754,7 +754,7 @@ class MemoryStore:
             return []
         async with self.connection.execute(
             """
-            SELECT id, memory_type, subject, content, tags, importance, strength, updated_at
+            SELECT id, memory_type, memory_key, subject, content, tags, importance, strength, updated_at
             FROM memories
             WHERE scope_type = ? AND scope_key = ?
             ORDER BY updated_at DESC
