@@ -499,6 +499,49 @@ async def test_decay_skips_writes_within_tolerance():
     await store.close()
 
 
+@pytest.mark.asyncio
+async def test_decay_anchors_expired_events_to_event_date():
+    """事件型记忆过宽限期后衰减锚定事件日，召回强化也无法维持强度"""
+    store = await _make_store()
+    # 事件日 10 天前：事件日 + 7 天宽限期 = 3 天前起衰减
+    event_date = time.strftime("%Y-%m-%d", time.localtime(time.time() - 10 * 86400))
+    mid = await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content=f"[{event_date}] 用户去北京出差",
+    )
+    await store.decay_and_forget(0.5, 0.5)
+    rows = {
+        r["id"]: r["strength"] for r in await store.get_scope_memories("private", "p:1")
+    }
+    # 衰减等效 3 天多一点（日期取当地零点），界于 3-4 天之间
+    assert 0.5**4 < rows[mid] < 0.5**3
+
+    # 未来事件不受影响：刚写入未衰减
+    future_date = time.strftime("%Y-%m-%d", time.localtime(time.time() + 30 * 86400))
+    future_id = await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content=f"[{future_date}] 用户计划去三亚度假",
+    )
+    await store.decay_and_forget(0.5, 0.5)
+    rows = {
+        r["id"]: r["strength"] for r in await store.get_scope_memories("private", "p:1")
+    }
+    assert rows[future_id] == pytest.approx(1.0)
+
+    # 召回强化刷新不了过期事件的衰减锚点
+    await store.reinforce_memories([mid])
+    await store.decay_and_forget(0.5, 0.5)
+    rows = {
+        r["id"]: r["strength"] for r in await store.get_scope_memories("private", "p:1")
+    }
+    assert 0.5**4 < rows[mid] < 0.5**3
+    await store.close()
+
+
 # ==================== store: semantic capacity ====================
 
 

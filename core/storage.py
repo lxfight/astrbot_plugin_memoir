@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,15 @@ from astrbot.api import logger
 def _escape_like(text: str) -> str:
     """转义 LIKE 模式中的通配符，防用户输入干扰匹配"""
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+# 事件型记忆的 [YYYY-MM-DD] 日期前缀（由巩固抽取在时间归一化时写入）
+_EVENT_DATE_PREFIX_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2})\]")
+
+# 事件型记忆过期的宽限天数：事件日过了该天数后，衰减锚点从「最近激活
+# 时间」切换为「事件日+宽限期」——已过期的时效性事实（出差已结束、约定
+# 已到期）不应靠反复提及保持鲜活；重新确认的事件会由巩固流程更新日期前缀
+_EVENT_STALE_GRACE_DAYS = 7
 
 
 SCHEMA_SQL = """
@@ -1033,6 +1043,9 @@ class MemoryStore:
 
         strength 是墙钟时间的纯函数：strength = 保留比例 ** 流逝天数，
         激活指写入、更新或召回强化（三者都会把 updated_at 刷新为当前时刻）。
+        事件型记忆（[YYYY-MM-DD] 前缀）的事件日已过宽限期后，衰减天数改按
+        「事件日 + 宽限期」起算并取与激活衰减的较弱者：无论是否被召回强化，
+        过期事件都会持续衰减，直到被巩固流程更新（新事件日期会重置锚点）。
         与巩固扫描周期无关——调整扫描频率不会改变遗忘速度，长时间停机后的
         首次扫描也会一次性补齐期间累积的衰减；重复执行幂等，不会像逐次
         相乘那样在陈旧强度上叠加。重算结果与现值差异在容差内的行跳过写入，
@@ -1053,7 +1066,7 @@ class MemoryStore:
         }
         now = int(time.time())
         async with self.connection.execute(
-            "SELECT id, memory_type, updated_at, strength FROM memories "
+            "SELECT id, memory_type, content, updated_at, strength FROM memories "
             "WHERE memory_type IN ('semantic', 'insight')"
         ) as cursor:
             rows = await cursor.fetchall()
@@ -1063,6 +1076,20 @@ class MemoryStore:
             if rate is None:
                 continue
             days = max(0.0, (now - row["updated_at"]) / 86400.0)
+            # 过期日期规则：事件型记忆的事件日已过宽限期后，衰减从
+            # 「事件日+宽限期」起算，取与激活衰减的较弱者
+            match = _EVENT_DATE_PREFIX_RE.match(row["content"] or "")
+            if match:
+                try:
+                    event_ts = time.mktime(time.strptime(match.group(1), "%Y-%m-%d"))
+                except ValueError:
+                    event_ts = None
+                if event_ts is not None:
+                    event_days = (
+                        now - event_ts - _EVENT_STALE_GRACE_DAYS * 86400
+                    ) / 86400.0
+                    if event_days > days:
+                        days = event_days
             strength = rate**days
             # 差值在容差内不写：相邻扫描周期 seconds 级时间差引起的强度变化
             # 远小于排序所需的精度，全部重写只会放大 WAL 写入量
