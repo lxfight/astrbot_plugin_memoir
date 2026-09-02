@@ -1,8 +1,9 @@
 """
 存储层：基于 aiosqlite 的记忆持久化。
 
-不引入向量数据库。检索对 content/tags 做 LIKE 子串匹配，
-按相关性（命中线索数、tags 加权）+ 结构化字段（强度 strength、重要度 importance）排序。
+不引入向量数据库。检索为双通道融合：精确通道（整句子串命中、tags/subject
+等值命中，大幅加分置顶）+ 模糊通道（content/tags LIKE 子串命中数 +
+结构化字段排序），零额外依赖。向量通道（sqlite-vec）为预留的实验扩展。
 """
 
 from __future__ import annotations
@@ -14,6 +15,12 @@ from typing import Any
 
 import aiosqlite
 from astrbot.api import logger
+
+
+def _escape_like(text: str) -> str:
+    """转义 LIKE 模式中的通配符，防用户输入干扰匹配"""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS memories (
@@ -505,26 +512,26 @@ class MemoryStore:
         query_terms: list[str],
         top_k: int = 5,
         boost_subject: str | None = None,
+        phrase: str | None = None,
     ) -> list[dict[str, Any]]:
-        """子串匹配检索 + 相关性评分排序（不使用向量相似度，也不依赖 FTS5 分词）。
+        """双通道检索：精确命中加权置顶 + 模糊线索评分排序。
 
-        用当前用户发言的关键线索对记忆的 content/tags 做子串命中。
-        相关性 = 1 + content 命中线索数 + 2×tags 命中线索数，tags 加权是因为
-        tags 由 LLM 归一化生成，是跨措辞同义匹配（"出差"vs"去北京"）的桥梁。
-        boost_subject 非空时，subject 与其一致（群聊中关于当前发言人）的记忆
-        额外加 2 分：群聊是整群共享记忆池，提问者相关的事实更可能被需要。
+        精确通道（高精度、低召回，命中即大幅加分）：
+        - phrase 整句子串命中 content（用户原话在记忆中出现，最强的回忆线索）；
+        - 线索与 tags 等值命中（tags 是 LLM 归一化的检索桥梁，等值命中比子串更可信）；
+        - 线索与 subject 等值命中（群聊中提到某人的名字）。
+        模糊通道（高召回）：content/tags 对每个线索做 LIKE 子串命中，
+        相关性 = 1 + content 命中数 + 2×tags 命中数；boost_subject 非空时，
+        subject 与当前发言人一致的记忆额外加 2 分（群聊共享记忆池）。
+        两个通道分数相加融合，精确命中自然浮到结果顶部。
         排序：相关性 > 类型（洞察>语义>情景）> strength > importance。
-        WHERE 条件保证每条结果至少命中一个线索。
         """
         if self.connection is None or not query_terms:
             return []
         terms = [t for t in query_terms if t and t.strip()]
         if not terms:
             return []
-        likes = [
-            "%" + t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            for t in terms
-        ]
+        likes = ["%" + _escape_like(t) + "%" for t in terms]
         content_hits = " + ".join(["(content LIKE ? ESCAPE '\\')"] * len(terms))
         # tags 可能为 NULL（未生成 tags 的记忆），NULL LIKE 结果为 NULL 会把整条
         # 相关性拖成 NULL，必须按 0 参与计算
@@ -533,9 +540,31 @@ class MemoryStore:
             ["(content LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"] * len(terms)
         )
         subject_boost = "(CASE WHEN subject = ? THEN 2 ELSE 0 END)"
+
+        # 精确通道加分项：等值/整句命中直接叠加进相关性
+        exact_parts: list[str] = []
+        exact_params: list[Any] = []
+        if phrase:
+            exact_parts.append(
+                "(CASE WHEN content LIKE ? ESCAPE '\\' THEN 5 ELSE 0 END)"
+            )
+            exact_params.append("%" + _escape_like(phrase) + "%")
+        exact_parts.extend(
+            [
+                "(CASE WHEN (',' || IFNULL(tags, '') || ',') LIKE ? ESCAPE '\\' THEN 3 ELSE 0 END)"
+            ]
+            * len(terms)
+        )
+        exact_params.extend("%," + _escape_like(t) + ",%" for t in terms)
+        placeholders = ",".join("?" * len(terms))
+        exact_parts.append(f"(CASE WHEN subject IN ({placeholders}) THEN 3 ELSE 0 END)")
+        exact_params.extend(terms)
+        exact_bonus = " + ".join(exact_parts)
+
         sql = f"""
             SELECT *,
-                (1 + ({content_hits}) + 2 * ({tag_hits}) + {subject_boost}) AS relevance
+                (1 + ({content_hits}) + 2 * ({tag_hits}) + {subject_boost}
+                 + {exact_bonus}) AS relevance
             FROM memories
             WHERE ({where_clause}) AND scope_type = ? AND scope_key = ?
             ORDER BY
@@ -551,6 +580,7 @@ class MemoryStore:
         params.extend(likes)  # content_hits
         params.extend(likes)  # tag_hits
         params.append(boost_subject or "")  # subject_boost（空串不匹配任何 subject）
+        params.extend(exact_params)  # 精确通道
         for like in likes:  # where OR pairs
             params.extend([like, like])
         params.extend([scope_type, scope_key, top_k])
@@ -586,10 +616,13 @@ class MemoryStore:
         query_terms: list[str],
         top_k: int = 3,
         exclude_recent: int = 0,
+        phrase: str | None = None,
     ) -> list[dict[str, Any]]:
-        """线索层检索原始对话轮次：LIKE 子串命中 + 相关性（命中线索数）> 时间新近排序。
+        """线索层检索原始对话轮次：精确整句命中加分 + 模糊线索命中数排序。
 
         原始轮次没有 tags，相关性 = 1 + content 命中线索数；
+        phrase（用户当前整句）在 content 中子串命中时额外加 5 分——
+        用户复述此前对话原文是最强、最精确的回忆线索。
         原文引用（「上次你说……」）比转述事实更接近真人回忆，与结构化记忆互补。
 
         Args:
@@ -601,12 +634,14 @@ class MemoryStore:
         terms = [t for t in query_terms if t and t.strip()]
         if not terms:
             return []
-        likes = [
-            "%" + t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            for t in terms
-        ]
+        likes = ["%" + _escape_like(t) + "%" for t in terms]
         content_hits = " + ".join(["(content LIKE ? ESCAPE '\\')"] * len(terms))
         where_clause = " OR ".join(["(content LIKE ? ESCAPE '\\')"] * len(terms))
+        phrase_bonus = ""
+        phrase_param: list[Any] = []
+        if phrase:
+            phrase_bonus = "+ (CASE WHEN content LIKE ? ESCAPE '\\' THEN 5 ELSE 0 END)"
+            phrase_param.append("%" + _escape_like(phrase) + "%")
         exclude_clause = ""
         if exclude_recent > 0:
             exclude_clause = """
@@ -617,7 +652,7 @@ class MemoryStore:
               )"""
         sql = f"""
             SELECT *,
-                (1 + ({content_hits})) AS relevance
+                (1 + ({content_hits}) {phrase_bonus}) AS relevance
             FROM raw_turns
             WHERE ({where_clause}) AND scope_type = ? AND scope_key = ?{exclude_clause}
             ORDER BY relevance DESC, created_at DESC
@@ -625,6 +660,7 @@ class MemoryStore:
         """
         params: list[Any] = []
         params.extend(likes)  # content_hits
+        params.extend(phrase_param)  # 精确整句命中
         params.extend(likes)  # where OR
         params.extend([scope_type, scope_key])
         if exclude_recent > 0:

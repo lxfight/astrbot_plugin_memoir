@@ -246,6 +246,10 @@ async def handle_recall(
     # 线索来自整个情境而非单句才是「编码特异性」的完整实现
     query_text = req.prompt or event.message_str or ""
     terms = extract_terms(query_text)
+    # 精确通道短语：当前整句在记忆/原文中子串命中是最强的回忆线索；
+    # 过长的句子按前 60 字符截断后子串命中率趋近于零，直接跳过该通道
+    stripped = query_text.strip()
+    phrase = stripped[:60] if 2 <= len(stripped) <= 60 else None
     if len(terms) < _MAX_QUERY_TERMS:
         context_turns = await store.get_recent_raw(
             scope.scope_type, scope.scope_key, _CONTEXT_CUE_TURNS
@@ -268,6 +272,7 @@ async def handle_recall(
             int(config.get("recall_top_k", 5)),
             # 群聊整群共享记忆池：关于当前发言人的记忆更可能被需要
             boost_subject=event.get_sender_name() if scope_type == "group" else None,
+            phrase=phrase,
         )
         if cued:
             await store.reinforce_memories([m["id"] for m in cued])
@@ -293,6 +298,7 @@ async def handle_recall(
             terms,
             top_k=3,
             exclude_recent=exclude_recent,
+            phrase=phrase,
         )
     cued_ids = {m["id"] for m in cued}
     raw_ids = {m["id"] for m in cued_raw}

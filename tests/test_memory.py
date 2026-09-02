@@ -342,6 +342,79 @@ async def test_migration_adds_memory_key_column(tmp_path):
     await store.close()
 
 
+@pytest.mark.asyncio
+async def test_search_exact_tag_equality_ranks_first():
+    """精确通道：tags 等值命中能在模糊评分持平/落后时反超置顶"""
+    store = await _make_store()
+    await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="用户喜欢徒步",
+        tags="花粉",
+    )
+    # 后插入：模糊评分同为 3 时按 updated_at 倒序应排前
+    await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="花粉过敏粉尘",
+    )
+    hits = await store.search_memories("private", "p:1", ["花粉", "过敏"], top_k=2)
+    # tags 等值命中「花粉」+3 后精确通道反超
+    assert hits[0]["content"] == "用户喜欢徒步"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_search_phrase_bonus_ranks_first():
+    """精确通道：content 包含整句短语时大幅加分置顶"""
+    store = await _make_store()
+    await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="北京烤鸭好吃",
+    )
+    # 后插入且模糊评分持平（同为 3 条线索命中）时按 updated_at 倒序应排前
+    await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="北京的烤鸭很好吃份量足",
+    )
+    terms = ["北京", "烤鸭", "好吃", "份量"]
+    # 模糊通道：后者多命中「份量」，评分更高
+    hits = await store.search_memories("private", "p:1", terms, top_k=2)
+    assert hits[0]["content"] == "北京的烤鸭很好吃份量足"
+    # 传入整句短语：content 包含该短语的前者精确加分后反超置顶
+    hits = await store.search_memories(
+        "private", "p:1", terms, top_k=2, phrase="北京烤鸭好吃"
+    )
+    assert hits[0]["content"] == "北京烤鸭好吃"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_search_raw_phrase_bonus_ranks_first():
+    """原文检索的精确通道：content 包含整句短语时置顶"""
+    store = await _make_store()
+    await store.insert_raw_turn(
+        scope_type="private", scope_key="p:1", content="北京烤鸭好吃"
+    )
+    await store.insert_raw_turn(
+        scope_type="private", scope_key="p:1", content="北京的烤鸭很好吃份量足"
+    )
+    terms = ["北京", "烤鸭", "好吃", "份量"]
+    hits = await store.search_raw("private", "p:1", terms, top_k=2)
+    assert "北京的烤鸭很好吃份量足" == hits[0]["content"]
+    hits = await store.search_raw(
+        "private", "p:1", terms, top_k=2, phrase="北京烤鸭好吃"
+    )
+    assert hits[0]["content"] == "北京烤鸭好吃"
+    await store.close()
+
+
 # ==================== store: reinforce vs decay ====================
 
 
