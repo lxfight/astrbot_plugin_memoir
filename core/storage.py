@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS memories (
     scope_type TEXT NOT NULL,
     scope_key TEXT NOT NULL,
     memory_type TEXT NOT NULL,
+    memory_key TEXT,
     subject TEXT,
     content TEXT NOT NULL,
     tags TEXT,
@@ -120,6 +121,22 @@ class MemoryStore:
         await self.connection.execute("PRAGMA journal_mode = WAL")
         await self.connection.execute("PRAGMA busy_timeout = 10000")
         await self.connection.executescript(SCHEMA_SQL)
+        # memory_key 迁移：旧库的 memories 表没有该列，CREATE TABLE IF NOT EXISTS
+        # 不会补列，须先 ALTER 再建唯一索引（索引依赖该列，不能放进 SCHEMA_SQL）
+        cursor = await self.connection.execute("PRAGMA table_info(memories)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "memory_key" not in columns:
+            await self.connection.execute(
+                "ALTER TABLE memories ADD COLUMN memory_key TEXT"
+            )
+            logger.info("[Memoir] 已为 memories 表补充 memory_key 列")
+        await self.connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_scope_key
+                ON memories(scope_type, scope_key, memory_key)
+                WHERE memory_key IS NOT NULL
+            """
+        )
         # 旧版本（0.1.0）通过 LLM 逐轮抽取情景记忆，新架构改为原始轮次落库，
         # episodic 不再产生，历史数据一次性清理，由衰减机制交给遗忘流程的语义记忆替代
         cursor = await self.connection.execute(
@@ -195,6 +212,7 @@ class MemoryStore:
         memory_type: str,
         content: str,
         subject: str | None = None,
+        memory_key: str | None = None,
         tags: str | None = None,
         importance: int = 3,
         sensitivity_level: str = "low",
@@ -203,10 +221,69 @@ class MemoryStore:
         source_ref: str | None = None,
         expire_at: int | None = None,
     ) -> int:
-        """写入一条结构化记忆（semantic/insight）。情景记忆已由 raw_turns 取代。"""
+        """写入一条结构化记忆（semantic/insight）。情景记忆已由 raw_turns 取代。
+
+        memory_key 是记忆条目的规范唯一索引（如 "user:job"），由巩固阶段的
+        抽取模型生成。撞已有 key 时自动转为对既有条目的更新（内容覆盖 +
+        重新激活），保证「更新还是新建」即使被模型判错也不会产生重复条目。
+
+        Returns:
+            新插入条目的 id；撞 key 转更新时返回既有条目的 id。
+        """
         if self.connection is None:
             raise RuntimeError("数据库连接未初始化")
         now = int(time.time())
+        if memory_key:
+            try:
+                cursor = await self.connection.execute(
+                    """
+                    INSERT INTO memories (
+                        scope_type, scope_key, memory_type, memory_key, subject, content, tags,
+                        importance, sensitivity_level, sensitivity_category,
+                        source_type, source_ref,
+                        created_at, updated_at, expire_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        scope_type,
+                        scope_key,
+                        memory_type,
+                        memory_key,
+                        subject,
+                        content,
+                        tags,
+                        importance,
+                        sensitivity_level,
+                        sensitivity_category,
+                        source_type,
+                        source_ref,
+                        now,
+                        now,
+                        expire_at,
+                    ),
+                )
+                await self.connection.commit()
+                return cursor.lastrowid or 0
+            except aiosqlite.IntegrityError:
+                # 同 scope 下已有相同 key：转为更新既有条目（取最新的陈述覆盖）
+                await self.connection.execute("ROLLBACK")
+                cursor = await self.connection.execute(
+                    "SELECT id FROM memories WHERE scope_type = ? AND scope_key = ? AND memory_key = ?",
+                    (scope_type, scope_key, memory_key),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise
+                await self.update_memory_content(
+                    row["id"],
+                    content,
+                    importance=importance,
+                    tags=tags,
+                )
+                logger.debug(
+                    f"[Memoir] memory_key 冲突转为更新: {scope_key}/{memory_key}"
+                )
+                return row["id"]
         cursor = await self.connection.execute(
             """
             INSERT INTO memories (
@@ -242,13 +319,16 @@ class MemoryStore:
         content: str,
         importance: int | None = None,
         tags: str | None = None,
+        memory_key: str | None = None,
     ) -> None:
         """直接覆盖更新（当前版本的语义记忆更新策略）。
 
         更新即重新激活：strength 重置为 1.0 并刷新 updated_at，
         衰减从更新时刻重新起算。tags 传 None 表示保持不变；
         内容主题变化时由巩固流程传入新 tags，否则旧 tags 会让
-        更新后的记忆在 tags 加权检索中失配。
+        更新后的记忆在 tags 加权检索中失配。memory_key 传 None
+        表示保持不变；非 None 时用于给无 key 的旧条目回填，
+        但同 scope 下已有其他条目占用该 key 时不回填（避免唯一索引冲突）。
         """
         if self.connection is None:
             return
@@ -261,6 +341,23 @@ class MemoryStore:
         if tags is not None:
             sets.append("tags = ?")
             params.append(tags)
+        if memory_key is not None:
+            cursor = await self.connection.execute(
+                """
+                SELECT id FROM memories
+                WHERE scope_type = (SELECT scope_type FROM memories WHERE id = ?)
+                  AND scope_key = (SELECT scope_key FROM memories WHERE id = ?)
+                  AND memory_key = ? AND id != ?
+                """,
+                (memory_id, memory_id, memory_key, memory_id),
+            )
+            if await cursor.fetchone() is None:
+                sets.append("memory_key = ?")
+                params.append(memory_key)
+            else:
+                logger.debug(
+                    f"[Memoir] memory_key 已被其他条目占用，跳过回填: {memory_key}"
+                )
         params.append(memory_id)
         await self.connection.execute(
             f"UPDATE memories SET {', '.join(sets)} WHERE id = ?", params

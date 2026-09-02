@@ -208,6 +208,140 @@ async def test_search_raw_excludes_recent_turns():
     await store.close()
 
 
+# ==================== store: memory_key ====================
+
+
+@pytest.mark.asyncio
+async def test_insert_memory_key_collision_updates_existing():
+    """insert 撞已有 key 时自动转更新，返回既有条目 id，不产生重复行"""
+    store = await _make_store()
+    first_id = await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="用户是后端程序员",
+        memory_key="user:job",
+        tags="工作,程序员",
+    )
+    await _backdate_memory(store, first_id, 3)
+    dup_id = await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="用户是算法工程师",
+        memory_key="user:job",
+        tags="工作,算法",
+        importance=4,
+    )
+    assert dup_id == first_id
+    rows = await store.get_scope_memories("private", "p:1")
+    assert len(rows) == 1
+    assert rows[0]["content"] == "用户是算法工程师"
+    assert rows[0]["tags"] == "工作,算法"
+    assert rows[0]["importance"] == 4
+    # 撞 key 转更新即重新激活：强度重置、衰减时钟重置
+    assert rows[0]["strength"] == pytest.approx(1.0)
+    # 不同 scope 的同名 key 互不冲突
+    other_id = await store.insert_memory(
+        scope_type="private",
+        scope_key="p:2",
+        memory_type="semantic",
+        content="另一会话的工作",
+        memory_key="user:job",
+    )
+    assert other_id != first_id
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_update_memory_backfills_key():
+    """update 携带 key 时给无 key 的旧条目回填；key 已被占用时跳过"""
+    store = await _make_store()
+    legacy_id = await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="用户在北京工作",
+    )
+    await store.update_memory_content(
+        legacy_id, "用户在北京工作", memory_key="user:job"
+    )
+    rows = await store.get_scope_memories("private", "p:1")
+    assert rows[0]["content"] == "用户在北京工作"
+
+    # 另一条目先占用 key 后，再对旧条目回填同一 key 应被跳过
+    await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="用户已搬到上海",
+        memory_key="user:city",
+    )
+    await store.update_memory_content(
+        legacy_id, "用户在北京工作", memory_key="user:city"
+    )
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_adds_memory_key_column(tmp_path):
+    """旧库（memories 无 memory_key 列）初始化后自动补列并可用"""
+    import aiosqlite
+
+    db_path = tmp_path / "legacy.db"
+    conn = await aiosqlite.connect(db_path)
+    await conn.execute(
+        """
+        CREATE TABLE memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_type TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            memory_type TEXT NOT NULL,
+            subject TEXT,
+            content TEXT NOT NULL,
+            tags TEXT,
+            importance INTEGER DEFAULT 3,
+            sensitivity_level TEXT DEFAULT 'low',
+            sensitivity_category TEXT,
+            source_type TEXT DEFAULT 'native',
+            source_ref TEXT,
+            strength REAL DEFAULT 1.0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            expire_at INTEGER
+        )
+        """
+    )
+    await conn.execute(
+        "INSERT INTO memories (scope_type, scope_key, memory_type, content, created_at, updated_at)"
+        " VALUES ('private', 'p:1', 'semantic', '旧认知', 0, 0)"
+    )
+    await conn.commit()
+    await conn.close()
+
+    store = MemoryStore(db_path)
+    await store.initialize()
+    rows = await store.get_scope_memories("private", "p:1")
+    assert rows[0]["content"] == "旧认知"
+    # 补列后 key 写入与唯一索引正常工作
+    await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="新认知",
+        memory_key="user:job",
+    )
+    dup_id = await store.insert_memory(
+        scope_type="private",
+        scope_key="p:1",
+        memory_type="semantic",
+        content="更新认知",
+        memory_key="user:job",
+    )
+    assert dup_id == rows[0]["id"] + 1
+    await store.close()
+
+
 # ==================== store: reinforce vs decay ====================
 
 
