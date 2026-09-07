@@ -10,7 +10,7 @@ const GLOBAL_FIELDS = [
     items: [
       { key: "enable_private_memory", label: "启用私聊记忆", type: "switch", hint: "关闭后所有私聊不进行记忆捕获与召回" },
       { key: "enable_group_memory", label: "启用群聊记忆", type: "switch", hint: "关闭后所有群聊不进行记忆捕获与召回" },
-      { key: "background_llm_provider", label: "后台小模型", type: "provider", hint: "巩固/抽取使用的模型，留空则用当前对话模型" },
+      { key: "background_llm_provider", label: "后台小模型", type: "provider", hint: "用于巩固及图片/语音解析，留空则用当前会话模型；媒体按提供商的模型能力处理，每条额外调用一次" },
     ],
   },
   {

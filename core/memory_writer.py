@@ -1,8 +1,8 @@
 """
-捕获（Capture）：原始对话轮次零成本落库。
+Capture conversation text and descriptions of supported incoming media.
 
-不做任何 LLM 判定与信息压缩——值得记住什么、怎么提炼，交给周期巩固的批量抽取。
-原文逐字保留，写入无信息损失，抽取质量也比逐轮孤立判定更高。
+Text capture does not call an LLM. Supported images and audio are described
+before storage; decisions about lasting memories remain in consolidation.
 
 - 私聊：on_llm_response 后把「用户 + 助手」完整一轮落库。
 - 群聊：被动捕获每条消息落库（此前为控制 LLM 成本的两级门控已无存在必要）；
@@ -13,9 +13,10 @@
 from __future__ import annotations
 
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.message_components import Image, Record
+from astrbot.api.message_components import File, Image, Record, Video
 from astrbot.api.provider import LLMResponse
 
+from .llm_helper import describe_multimedia
 from .scope import merge_scope_config, resolve_scope
 from .storage import MemoryStore
 
@@ -23,19 +24,25 @@ _MAX_CONTENT_LENGTH = 2000
 
 
 def _capture_text(event: AstrMessageEvent) -> str:
-    """消息链转捕获文本：文本保留，多媒体记占位符。
+    """Preserve message text with placeholders for attached media.
 
-    占位符防止巩固时信息凭空消失（LLM 至少知道这里发过图/语音）；
-    URL 不落库——对检索只有噪声，extract_terms 也会过滤占位符。
+    Args:
+        event: Incoming message event.
+
+    Returns:
+        Text with media counts, without attachment URLs or binary data.
     """
     text = (event.message_str or "").strip()
     chain = getattr(event.message_obj, "message", None) or []
-    n_image = sum(1 for c in chain if isinstance(c, Image))
-    n_record = sum(1 for c in chain if isinstance(c, Record))
-    if n_image:
-        text += f" [图片x{n_image}]" if n_image > 1 else " [图片]"
-    if n_record:
-        text += f" [语音x{n_record}]" if n_record > 1 else " [语音]"
+    for component, label in (
+        (Image, "图片"),
+        (Record, "语音"),
+        (Video, "视频"),
+        (File, "文件"),
+    ):
+        count = sum(1 for part in chain if isinstance(part, component))
+        if count:
+            text += f" [{label}x{count}]" if count > 1 else f" [{label}]"
     return text.strip()
 
 
@@ -58,6 +65,9 @@ async def handle_private_response(
     if not config.get("scope_enabled", True):
         return
     user_text = _capture_text(event)
+    description = await describe_multimedia(context, config, event)
+    if description:
+        user_text = f"{user_text[:1000]} [多媒体解析] {description}"
     assistant_text = (resp.completion_text or "").strip()
     if not user_text and not assistant_text:
         return
@@ -143,6 +153,12 @@ async def handle_group_message(
     ]
     if any(k in text for k in ignored_keywords):
         return
+    description = await describe_multimedia(context, config, event)
+    if description:
+        # Apply the same privacy filter to recognized speech and image text.
+        if any(k in description for k in ignored_keywords):
+            return
+        text = f"{text[:1000]} [多媒体解析] {description}"
     await store.insert_raw_turn(
         scope_type=scope.scope_type,
         scope_key=scope.scope_key,

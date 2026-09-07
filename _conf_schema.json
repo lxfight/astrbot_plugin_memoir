@@ -2,7 +2,7 @@
   "background_llm_provider": {
     "description": "后台小模型",
     "type": "string",
-    "hint": "用于记忆编码判定、巩固升华、洞察归纳的模型，建议使用成本更低的模型。留空则回退使用当前对话模型。",
+    "hint": "用于记忆巩固、洞察及图片/语音解析。留空则使用当前会话的对话模型。媒体仅在提供商「模型能力」勾选图像/音频时解析，每条含受支持媒体的消息额外调用一次模型；不支持时保留占位符。",
     "obvious_hint": true,
     "_special": "select_provider",
     "default": ""

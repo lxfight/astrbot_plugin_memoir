@@ -4,7 +4,8 @@
 群聊被动捕获使用 custom_filter：filter() 执行捕获副作用但始终返回 False，
 使 handler 不被激活、不唤醒机器人，从而收到所有群消息却不产生回复。
 
-捕获（落库）无 LLM 成本；LLM 只在周期巩固的批量抽取中使用。
+Text capture is free of LLM calls; supported media is described before storage.
+Consolidation uses the stored text for periodic batch extraction.
 """
 
 from __future__ import annotations
@@ -58,5 +59,9 @@ class EventHandler:
             )
 
     async def on_group_message(self, event: AstrMessageEvent) -> None:
-        """被动捕获的群消息：仅落库，不产生回复"""
+        """Capture group text and supported media without sending a reply.
+
+        Args:
+            event: Incoming group message event.
+        """
         await handle_group_message(self.context, self.config, self.store, event)
