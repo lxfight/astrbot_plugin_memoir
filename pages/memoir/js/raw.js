@@ -25,10 +25,10 @@ function speakerHue(name) {
 }
 
 function bubbleText(text) {
-  // Highlight placeholders like [图片] [语音x2], escape the rest
+  // Highlight attachment and generated-description markers after escaping text.
   return esc(text).replace(
-    /\[(图片|语音|文件|视频|表情)(?:x(\d+))?\]/g,
-    (_, kind, n) => `<span class="placeholder-chip">[${kind}${n ? `x${n}` : ""}]</span>`,
+    /\[(图片|语音|文件|视频|表情|多媒体解析)(?:x(\d+))?\]/g,
+    (_, kind, n) => `<span class="placeholder-chip${kind === "多媒体解析" ? " media-description" : ""}">[${kind}${n ? `x${n}` : ""}]</span>`,
   );
 }
 
@@ -39,7 +39,7 @@ function rawTurnHtml(r, prevDay, i) {
     ? ""
     : `<span class="pending-pill">待巩固</span>`;
   const speaker = r.speaker_name
-    ? `<span class="speaker" style="color:hsl(${speakerHue(r.speaker_name)} 45% 42%)">${esc(r.speaker_name)}</span> ·`
+    ? `<span class="speaker" style="--speaker-hue:${speakerHue(r.speaker_name)}">${esc(r.speaker_name)}</span> ·`
     : "";
   const head = `<div class="msg-head">${speaker}<span>${fmtTime(r.created_at)}</span><span>#${r.id}</span>${pending}<button class="del" data-del-raw="${r.id}" title="删除这轮"><i data-lucide="trash-2"></i></button></div>`;
   const parts = parseTurn(r.content);

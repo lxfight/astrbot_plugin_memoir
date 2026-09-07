@@ -59,7 +59,7 @@ function fieldRow(f, value, inheritValue, inheritable) {
   if (!inheritable) {
     if (f.type === "switch") {
       control = `<label class="switch"><input type="checkbox" data-cfg="${f.key}" ${value ? "checked" : ""} /><span class="slider"></span></label>`;
-    } else if (f.type === "select") {
+    } else if (f.type === "select" || f.type === "provider") {
       const opts = (f.type === "provider" ? state.providers : f.options) || [];
       control = `<select class="f-input" data-cfg="${f.key}">${
         f.type === "provider" ? `<option value="">（使用当前对话模型）</option>` : ""
@@ -84,7 +84,9 @@ function fieldRow(f, value, inheritValue, inheritable) {
       control = `<input type="number" class="f-input" data-cfg="${f.key}" value="${value ?? ""}" placeholder="${inheritValue ?? "继承全局"}" />`;
     }
   }
-  return `<div class="field"><div style="flex:1;min-width:0"><div class="f-label">${esc(f.label)}</div>${hint}</div>${control}</div>`;
+  const id = `${inheritable ? "scope" : "global"}-${f.key}`;
+  control = control.replace(/<(input|select) /, `<$1 id="${id}" `);
+  return `<div class="field"><div style="flex:1;min-width:0"><label class="f-label" for="${id}">${esc(f.label)}</label>${hint}</div>${control}</div>`;
 }
 
 export async function loadScopeConfigTab() {
@@ -121,7 +123,7 @@ export async function loadScopeConfigTab() {
     return `<div class="form-section-sub"${stagger(si, 0)}>${esc(gsec.section)}</div>${gRows}`;
   }).join("");
   $("content").innerHTML = `
-    <div class="form-card"${stagger(0)}>
+    <div class="form-card" id="scope-config-form"${stagger(0)}>
       <div class="form-title"><i data-lucide="sliders-horizontal"></i>会话覆盖配置</div>
       <p class="form-sub">仅对此会话生效；留空/「跟随全局」表示使用下方全局默认值</p>
       ${rows}
@@ -130,7 +132,7 @@ export async function loadScopeConfigTab() {
         <button class="btn primary" id="save-scope-cfg"><i data-lucide="check"></i>保存覆盖</button>
       </div>
     </div>
-    <div class="form-card"${stagger(1)}>
+    <div class="form-card" id="global-config-form"${stagger(1)}>
       <div class="form-title"><i data-lucide="globe"></i>全局默认配置</div>
       <p class="form-sub">对所有未单独配置的会话生效</p>
       ${globalRows}
@@ -150,7 +152,7 @@ export async function loadScopeConfigTab() {
 function collectScopeOverride() {
   const override = {};
   for (const f of SCOPE_FIELDS) {
-    const el = document.querySelector(`[data-cfg="${f.key}"]`);
+    const el = document.querySelector(`#scope-config-form [data-cfg="${f.key}"]`);
     if (!el) continue;
     if (f.type === "inherit-switch") {
       if (el.value !== "") override[f.key] = el.value === "true";
@@ -189,7 +191,7 @@ function collectGlobalConfig() {
   const payload = {};
   for (const sec of GLOBAL_FIELDS) {
     for (const f of sec.items) {
-      const el = document.querySelector(`[data-cfg="${f.key}"]`);
+      const el = document.querySelector(`#global-config-form [data-cfg="${f.key}"]`);
       if (!el) continue;
       if (f.type === "switch") payload[f.key] = el.checked;
       else if (f.type === "number" || f.type === "float") payload[f.key] = Number(el.value);

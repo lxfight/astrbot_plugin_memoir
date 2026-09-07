@@ -2,6 +2,7 @@ import { $, RETRY_LOADERS, state } from "./state.js";
 import { esc, refreshIcons, toast } from "./utils.js";
 import { bridge, safe } from "./api.js";
 import { initParticles } from "./particles.js";
+import { initTheme } from "./theme.js";
 import { renderOverview, renderSidebar, renderDetailHead } from "./sidebar.js";
 import { loadMemories } from "./memories.js";
 import { loadRaw } from "./raw.js";
@@ -93,7 +94,10 @@ function bindEvents() {
   $("tabs").addEventListener("click", (e) => {
     const tab = e.target.closest(".tab");
     if (!tab) return;
-    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
+    document.querySelectorAll(".tab").forEach((t) => {
+      t.classList.toggle("active", t === tab);
+      t.setAttribute("aria-pressed", String(t === tab));
+    });
     state.tab = tab.dataset.tab;
     state.page = 1;
     loadTab();
@@ -184,19 +188,13 @@ function bindEvents() {
 }
 
 async function main() {
+  const updateThemeContext = initTheme();
   initParticles();
-  const ctx = await bridge.ready();
-  if (typeof ctx?.isDark === "boolean") {
-    document.documentElement.setAttribute("data-theme", ctx.isDark ? "dark" : "light");
-  }
-  bridge.onContext((c) => {
-    if (typeof c?.isDark === "boolean") {
-      document.documentElement.setAttribute("data-theme", c.isDark ? "dark" : "light");
-      window.__fxRecolor?.();
-    }
-  });
-
   bindEvents();
+  refreshIcons();
+  const ctx = await bridge.ready();
+  updateThemeContext(ctx);
+  bridge.onContext(updateThemeContext);
   await refreshAll();
 }
 

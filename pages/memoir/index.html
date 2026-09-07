@@ -4,11 +4,21 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>记忆管理 - Memoir</title>
+    <script>
+      // Apply the saved appearance before styles load to avoid a light flash.
+      try {
+        const saved = localStorage.getItem("memoir.theme");
+        document.documentElement.dataset.theme = ["light", "dark"].includes(saved)
+          ? saved : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      } catch {
+        document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+    </script>
     <script src="https://cdn.jsdelivr.net/npm/lucide@0.469.0/dist/umd/lucide.min.js"></script>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <canvas id="fx"></canvas>
+    <canvas id="fx" aria-hidden="true"></canvas>
     <div class="app">
       <aside class="sidebar">
         <div class="brand">
@@ -24,15 +34,23 @@
         <div class="side-search">
           <div class="search-wrap">
             <i data-lucide="search"></i>
-            <input type="text" id="scope-filter" placeholder="搜索会话" />
+            <input type="search" id="scope-filter" placeholder="搜索会话" aria-label="搜索会话" />
           </div>
         </div>
 
         <div class="scope-list" id="scope-list"></div>
 
+        <div class="appearance">
+          <div class="appearance-head"><span id="theme-label">外观</span><span id="theme-status" aria-live="polite"></span></div>
+          <div class="theme-picker" role="group" aria-labelledby="theme-label">
+            <label><input type="radio" name="theme" value="auto" checked /><span><i data-lucide="monitor"></i>跟随</span></label>
+            <label><input type="radio" name="theme" value="light" /><span><i data-lucide="sun"></i>浅色</span></label>
+            <label><input type="radio" name="theme" value="dark" /><span><i data-lucide="moon"></i>深色</span></label>
+          </div>
+        </div>
         <div class="side-foot">
           <span class="foot-hint">每个会话可独立调整策略</span>
-          <button class="icon-btn" id="refresh" title="刷新"><i data-lucide="refresh-cw"></i></button>
+          <button class="icon-btn" id="refresh" title="刷新" aria-label="刷新"><i data-lucide="refresh-cw"></i></button>
         </div>
       </aside>
 
@@ -40,26 +58,26 @@
         <div class="detail-head" id="detail-head"></div>
         <div class="tabs" id="tabs">
           <div class="tab-group">
-            <button class="tab active" data-tab="memories"><i data-lucide="brain"></i>记忆</button>
-            <button class="tab" data-tab="raw"><i data-lucide="messages-square"></i>原文对话</button>
-            <button class="tab" data-tab="settings"><i data-lucide="settings-2"></i>会话配置</button>
+            <button class="tab active" data-tab="memories" aria-pressed="true"><i data-lucide="brain"></i>记忆</button>
+            <button class="tab" data-tab="raw" aria-pressed="false"><i data-lucide="messages-square"></i>原文对话</button>
+            <button class="tab" data-tab="settings" aria-pressed="false"><i data-lucide="settings-2"></i>会话配置</button>
           </div>
           <div class="spacer"></div>
           <div class="search-wrap tab-search" id="search-wrap">
             <i data-lucide="search"></i>
-            <input type="text" id="search" placeholder="搜索当前会话记忆" />
+            <input type="search" id="search" placeholder="搜索当前会话记忆" aria-label="搜索当前会话记忆" />
           </div>
         </div>
         <div class="content" id="content"></div>
         <div class="pager" id="pager" style="display: none">
-          <button class="icon-btn" id="prev"><i data-lucide="chevron-left"></i></button>
+          <button class="icon-btn" id="prev" aria-label="上一页"><i data-lucide="chevron-left"></i></button>
           <span id="page-info"></span>
-          <button class="icon-btn" id="next"><i data-lucide="chevron-right"></i></button>
+          <button class="icon-btn" id="next" aria-label="下一页"><i data-lucide="chevron-right"></i></button>
         </div>
       </main>
     </div>
 
-    <div class="toast" id="toast"></div>
+    <div class="toast" id="toast" role="status"></div>
 
     <script type="module" src="./js/main.js"></script>
   </body>
