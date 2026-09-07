@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+暂无未发布更新。
+
+## [0.4.0] — 2026-09-07
+
 ### 新增
 
 - 插件图标：原创「记忆小仓鼠」抱着青绿色记忆本；提供 256×256 `logo.png` 和可编辑 SVG 源文件。
@@ -41,7 +45,7 @@
 
 ### 升级说明
 
-- 当前版本字段仍为 `0.3.0.dev0`，本节功能尚未创建新的发布标签。
+- 本次为 0.4.0 正式版，包含自 `0.3.0.dev0` 以来的功能更新与可靠性修复。
 - 重载插件时自动迁移数据库，包括稳定人物标识、会话版本和持久化任务；迁移保留已有记忆。
 - 历史多媒体占位符没有原始媒体引用，无法追补识别；旧会话缺少模型会话标识时，可指定后台模型或产生新消息后重试。
 
@@ -65,5 +69,6 @@
 - 收窄模型巩固指令与原文数据混合造成的提示注入影响面。
 - 拆分 WebUI 样式与 ES 模块，增加完整记忆流程回归测试。
 
-[Unreleased]: https://github.com/lxfight/astrbot_plugin_memoir/compare/v0.3.0.dev0...HEAD
+[Unreleased]: https://github.com/lxfight/astrbot_plugin_memoir/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.4.0
 [0.3.0.dev0]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.3.0.dev0
