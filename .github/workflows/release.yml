@@ -3,55 +3,85 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish or retry, for example v0.4.0
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   ci:
     uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
   release:
     needs: ci
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-      - name: Verify tag matches plugin version
+      - name: Validate tag and extract changelog notes
         run: |
-          tag_version="${GITHUB_REF_NAME#v}"
-          meta_version="$(sed -n 's/^version: *//p' metadata.yaml)"
-          pyproject_version="$(sed -n 's/^version = *"\(.*\)"/\1/p' pyproject.toml)"
-          echo "tag=$tag_version metadata=$meta_version pyproject=$pyproject_version"
-          if [ "$tag_version" != "$meta_version" ]; then
-            echo "::error::metadata.yaml version ($meta_version) does not match tag ($tag_version)"
-            exit 1
-          fi
-          if [ "$tag_version" != "$pyproject_version" ]; then
-            echo "::error::pyproject.toml version ($pyproject_version) does not match tag ($tag_version)"
-            exit 1
-          fi
+          python scripts/release_notes.py --tag "$RELEASE_TAG" --output "$RUNNER_TEMP/release-notes.md"
+          git show-ref --verify "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$RELEASE_TAG^{commit}")"
+          git merge-base --is-ancestor HEAD origin/main
 
-      - name: Package plugin
+      - name: Package and verify plugin
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          archive_name="astrbot_plugin_memoir-${RELEASE_TAG#v}.zip"
           mkdir -p dist
-          git archive --format=zip \
-            --prefix="astrbot_plugin_memoir/" \
-            -o "dist/astrbot_plugin_memoir-${version}.zip" HEAD
-          unzip -l "dist/astrbot_plugin_memoir-${version}.zip"
+          git archive --format=zip --prefix="astrbot_plugin_memoir/" -o "dist/$archive_name" HEAD
+          unzip -t "dist/$archive_name"
+          for file in main.py metadata.yaml requirements.txt logo.png CHANGELOG.md; do
+            unzip -p "dist/$archive_name" "astrbot_plugin_memoir/$file" > /dev/null
+          done
+          (cd dist && sha256sum "$archive_name" > SHA256SUMS)
 
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Preserve build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: memoir-${{ env.RELEASE_TAG }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish release from changelog
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          extra=()
-          case "$version" in
-            *dev*|*alpha*|*beta*|*rc*) extra+=(--prerelease) ;;
+          prerelease=false
+          latest=true
+          case "${RELEASE_TAG#v}" in
+            *dev*|*alpha*|*beta*|*rc*|*a*|*b*) prerelease=true; latest=false ;;
           esac
-          gh release create "$GITHUB_REF_NAME" \
-            "${extra[@]}" \
-            --title "astrbot_plugin_memoir ${version}" \
-            --generate-notes \
-            dist/astrbot_plugin_memoir-"${version}".zip
+          if ! gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft \
+              --title "Memoir ${RELEASE_TAG#v}" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --prerelease="$prerelease"
+          fi
+          gh release upload "$RELEASE_TAG" dist/*.zip dist/SHA256SUMS --clobber
+          gh release edit "$RELEASE_TAG" \
+            --title "Memoir ${RELEASE_TAG#v}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --prerelease="$prerelease" --draft=false --latest="$latest"

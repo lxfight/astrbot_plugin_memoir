@@ -8,3 +8,5 @@ __pycache__/
 *.db-shm
 data/
 .DS_Store
+dist/
+node_modules/
