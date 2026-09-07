@@ -163,6 +163,7 @@ async def test_private_memory_full_loop(monkeypatch):
     # Round 2: multimedia becomes a placeholder in the captured raw turn
     event2 = make_event("小福最爱吃鸡肉干", images=1)
     await handler.on_llm_response(event2, make_resp("狗狗都爱吃零食"))
+    await handler.media.process_once()
     _, total = await store.get_raw_turns("private", "test:u1")
     assert total == 2
     turns, _ = await store.get_raw_turns("private", "test:u1")
@@ -175,6 +176,7 @@ async def test_private_memory_full_loop(monkeypatch):
                 "semantic_ops": [
                     {
                         "action": "insert",
+                        "key": "pet:xiaofu",
                         "content": "用户养了一只柴犬，名叫小福",
                         "tags": "柴犬,小狗,狗,宠物",
                         "subject": None,
@@ -359,6 +361,8 @@ async def test_group_capture_consolidation_and_bridge(monkeypatch):
                         "content": "[2026-10-01] 张三要去北京出差",
                         "tags": "出差,北京,工作,旅行",
                         "subject": "张三",
+                        "subject_id": "u_zhang",
+                        "key": "user:trip",
                         "importance": 4,
                     }
                 ],
@@ -469,7 +473,7 @@ async def test_scope_override_gates_capture_and_recall():
 
     # Clearing the override restores inheritance from global defaults
     await store.set_scope_config("private", "test:u1", {})
-    await handler.on_llm_response(event, make_resp("好的"))
+    await handler.on_llm_response(make_event("新消息"), make_resp("好的"))
     _, total = await store.get_raw_turns("private", "test:u1")
     assert total == 1
 

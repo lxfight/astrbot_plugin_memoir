@@ -17,7 +17,12 @@ from astrbot.api.event import AstrMessageEvent
 
 # 会话可覆盖、且会被合并进钩子配置字典的键。
 # 「enabled」「bridge_enabled」映射为新键，与全局开关叠加判断。
-_DIRECT_KEYS = ("recall_top_k", "recall_core_top_k", "recall_recent_turns")
+_DIRECT_KEYS = (
+    "recall_top_k",
+    "recall_core_top_k",
+    "recall_recent_turns",
+    "recall_max_chars",
+)
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
-import { $, RETRY_LOADERS, TYPE_ICONS, TYPE_NAMES, state } from "./state.js";
+import { $, beginLoad, RETRY_LOADERS, TYPE_ICONS, TYPE_NAMES, state } from "./state.js";
 import { esc, emptyState, errorPanel, fmtTime, refreshIcons, renderPager, skeleton, stagger } from "./utils.js";
 import { bridge, safe } from "./api.js";
 
@@ -30,6 +30,7 @@ function memoryItem(m, i) {
       </div>
       <div class="mem-content">${esc(m.content)}</div>
       ${tags.length ? `<div class="mem-tags">${tags.map((t) => `<span class="mem-tag" data-tag="${esc(t)}">#${esc(t)}</span>`).join("")}</div>` : ""}
+      <details class="memory-sources" data-memory-source="${m.id}" data-scope-type="${esc(state.scope.scope_type)}" data-scope-key="${esc(state.scope.scope_key)}"><summary>查看来源</summary><div class="source-content">展开后加载来源</div></details>
       <div class="mem-foot">
         <span class="strength-bar"><span class="bar"><i style="width:${Math.round(strength * 100)}%"></i></span>强度 ${(strength).toFixed(2)}</span>
         ${importanceMeter(m.importance)}<span>重要度 ${m.importance ?? "-"}</span>
@@ -42,8 +43,9 @@ function memoryItem(m, i) {
 }
 
 export async function loadMemories() {
+  const request = beginLoad();
   $("content").innerHTML = skeleton();
-  const params = { scope_type: state.scope.scope_type, scope_key: state.scope.scope_key };
+  const params = request.scope;
   const res = await safe(
     "加载记忆",
     () =>
@@ -52,6 +54,7 @@ export async function loadMemories() {
         : bridge.apiGet("memories", { ...params, page: state.page, page_size: state.pageSize }),
     { silent: true },
   );
+  if (!request.current()) return;
   if (!res) {
     $("content").innerHTML = errorPanel("加载记忆", "请求失败，请检查后端状态后重试", "memories");
     refreshIcons();

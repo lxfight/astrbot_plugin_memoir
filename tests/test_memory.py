@@ -158,6 +158,7 @@ async def test_search_boosts_subject_matching_speaker():
         memory_type="semantic",
         content="张三想去北京旅游",
         subject="张三",
+        subject_id="u_zhang",
     )
     await store.insert_memory(
         scope_type="group",
@@ -169,7 +170,7 @@ async def test_search_boosts_subject_matching_speaker():
     # 错开 updated_at，保证不加权时按时间倒序的基线排序稳定
     await _backdate_memory(store, first_id, 0.01)
     hits = await store.search_memories(
-        "group", "g:1", ["北京"], top_k=2, boost_subject="张三"
+        "group", "g:1", ["北京"], top_k=2, boost_subject="u_zhang"
     )
     assert hits[0]["subject"] == "张三"
     # 不加权时保持原排序（updated_at 倒序，后插入的李四在前）
@@ -964,21 +965,21 @@ async def test_consolidation_parse_failure_backs_up_batch(monkeypatch):
 
     # 轮次照常推进水位（不无限重试卡死），但失败批已留档
     rows, _ = await store.get_raw_turns("private", "p:1")
-    assert all(r["extracted"] == 1 for r in rows)
+    assert all(r["extracted"] == -1 for r in rows)
     assert await store.get_scope_memories("private", "p:1") == []
     async with store.connection.execute(
-        "SELECT scope_type, scope_key, turn_ids, llm_output FROM consolidation_failures"
+        "SELECT scope_type, scope_key, raw_ids AS turn_ids, payload FROM work_items WHERE kind='consolidation'"
     ) as cursor:
         failures = [dict(r) for r in await cursor.fetchall()]
     assert len(failures) == 1
     assert failures[0]["scope_key"] == "p:1"
     assert json.loads(failures[0]["turn_ids"]) == [turn_a, turn_b]
-    assert failures[0]["llm_output"] == "抱歉，这不是 JSON"
+    assert json.loads(failures[0]["payload"])["output"] == "抱歉，这不是 JSON"
     await store.close()
 
 
 @pytest.mark.asyncio
-async def test_consolidation_llm_failure_keeps_pending(monkeypatch):
+async def test_consolidation_llm_failure_is_retryable(monkeypatch):
     store = await _make_store()
     await store.insert_raw_turn(
         scope_type="private", scope_key="p:1", content="用户提到下周去北京出差"
@@ -990,7 +991,10 @@ async def test_consolidation_llm_failure_keeps_pending(monkeypatch):
     monkeypatch.setattr(consolidation_module, "call_background_llm", fake_llm)
     await _consolidate_scope(None, {}, store, "private", "p:1")
 
-    # 模型调用失败：不推进水位，留待下轮，也不产生失败留档
+    # Failed batches are quarantined and can be requeued explicitly.
+    status = await store.get_processing_status("private", "p:1")
+    assert status["failures"][0]["retryable"]
+    assert await store.retry_work(status["failures"][0]["id"], "private", "p:1")
     activity = await store.get_scope_activity()
     assert activity[0]["pending"] == 1
     async with store.connection.execute(

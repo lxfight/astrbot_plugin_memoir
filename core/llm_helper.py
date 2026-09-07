@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from pathlib import Path
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
@@ -21,19 +22,23 @@ _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 _FALLBACK_WARNED = False
 
 
-async def describe_multimedia(context, config: dict, event: AstrMessageEvent) -> str:
+async def describe_multimedia(
+    context, config: dict, event: AstrMessageEvent, *, problems: list[str] | None = None
+) -> str:
     """Describe supported incoming media for later consolidation and retrieval.
 
     Args:
         context: AstrBot context used to resolve the selected provider.
         config: Effective memory configuration for this conversation.
         event: Incoming message containing images or audio.
+        problems: Optional destination for bounded operational failure reasons.
 
     Returns:
         A bounded, single-line description, or an empty string when unsupported
         or unavailable. Media URLs and binary data are never stored as memory.
     """
     chain = getattr(event.message_obj, "message", None) or []
+    issues = problems if problems is not None else []
     if not any(isinstance(part, (Image, Record)) for part in chain):
         return ""
     try:
@@ -46,6 +51,7 @@ async def describe_multimedia(context, config: dict, event: AstrMessageEvent) ->
                 timeout=10,
             )
         if provider is None:
+            issues.append("No available media model")
             return ""
         modalities = provider.provider_config.get("modalities")
         # Missing capabilities are unknown, so do not send media speculatively.
@@ -53,6 +59,10 @@ async def describe_multimedia(context, config: dict, event: AstrMessageEvent) ->
             return ""
         media: dict[str, list[str]] = {}
         labels = []
+        total_bytes = 0
+        if sum(isinstance(p, (Image, Record)) for p in chain) > 4:
+            issues.append("At most four attachments can be analyzed per message")
+            return ""
         for index, part in enumerate(chain, start=1):
             if isinstance(part, Image) and "image" in modalities:
                 key, label = "image_urls", "图片"
@@ -63,9 +73,17 @@ async def describe_multimedia(context, config: dict, event: AstrMessageEvent) ->
             try:
                 path = await asyncio.wait_for(part.convert_to_file_path(), timeout=10)
                 if path:
+                    size = (await asyncio.to_thread(Path(path).stat)).st_size
+                    if size > 10 * 1024 * 1024 or total_bytes + size > 20 * 1024 * 1024:
+                        issues.append(
+                            f"Attachment {index} exceeds the media size budget"
+                        )
+                        continue
+                    total_bytes += size
                     media.setdefault(key, []).append(path)
                     labels.append(f"消息段{index}: {label}")
             except Exception as exc:
+                issues.append(f"Attachment {index}: {type(exc).__name__}")
                 # One broken attachment must not discard the remaining media.
                 logger.warning(
                     "[Memoir] Media resolution failed (%s)", type(exc).__name__
@@ -90,8 +108,12 @@ async def describe_multimedia(context, config: dict, event: AstrMessageEvent) ->
             ),
             timeout=30,
         )
-        return " / ".join((resp.completion_text or "").split())[:800]
+        text = " / ".join((resp.completion_text or "").split())[:800]
+        if not text:
+            issues.append("Media model returned empty content")
+        return text
     except Exception as exc:
+        issues.append(f"Media request failed: {type(exc).__name__}")
         logger.warning("[Memoir] Media description failed (%s)", type(exc).__name__)
         return ""
 
@@ -126,6 +148,11 @@ async def call_background_llm(
                 )
                 _FALLBACK_WARNED = True
             umo = event.unified_msg_origin if event else None
+            if config.get("_require_session") and not umo:
+                logger.warning(
+                    "[Memoir] Session unavailable; select a background model or capture a new message"
+                )
+                return None
             provider = await context.get_using_provider_async(umo=umo)
             if provider is None:
                 logger.warning("[Memoir] 未找到可用的后台/对话模型，跳过本次处理")

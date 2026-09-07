@@ -19,8 +19,12 @@ from core.storage import MemoryStore
 
 
 @pytest.fixture
-def media_context():
+def media_context(monkeypatch):
     """Build a provider whose actual requests can be inspected."""
+    monkeypatch.setattr(
+        "core.llm_helper.Path",
+        lambda path: SimpleNamespace(stat=lambda: SimpleNamespace(st_size=100)),
+    )
     provider = SimpleNamespace(
         provider_config={"modalities": ["text", "image", "audio"]},
         text_chat=AsyncMock(
@@ -65,6 +69,7 @@ async def test_media_capture_consolidation_and_recall(
             await handler.on_llm_response(event, make_resp("好可爱"))
         else:
             await handler.on_group_message(event)
+        await handler.media.process_once()
         scope_type, scope_key = (
             ("private", "test:u1") if private else ("group", "test:g1")
         )
@@ -88,7 +93,8 @@ async def test_media_capture_consolidation_and_recall(
                         {
                             "action": "insert",
                             "content": "对话中展示了一只名叫小福的柴犬",
-                            "memory_key": "pet:xiaofu",
+                            "key": "pet:xiaofu",
+                            "subject_id": "u1" if not private else None,
                             "tags": "小福,柴犬",
                             "importance": 4,
                         }
@@ -220,6 +226,7 @@ async def test_recognized_keyword_is_filtered(media_context, monkeypatch):
             store,
         )
         await handler.on_group_message(make_event("", private=False, images=1))
+        await handler.media.process_once()
         assert (await store.get_raw_turns("group", "test:g1"))[1] == 0
     finally:
         await store.close()

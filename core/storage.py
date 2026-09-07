@@ -8,14 +8,35 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
+from contextlib import asynccontextmanager
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 from astrbot.api import logger
+
+
+def serialized(method):
+    """Serialize database access and join the caller's transaction.
+
+    Args:
+        method: Storage operation to wrap.
+
+    Returns:
+        An operation that cannot interleave SQL with another task.
+    """
+
+    @wraps(method)
+    async def wrapped(self, *args, **kwargs):
+        async with self.transaction():
+            return await method(self, *args, **kwargs)
+
+    return wrapped
 
 
 def _escape_like(text: str) -> str:
@@ -40,6 +61,7 @@ CREATE TABLE IF NOT EXISTS memories (
     memory_type TEXT NOT NULL,
     memory_key TEXT,
     subject TEXT,
+    subject_id TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL,
     tags TEXT,
     importance INTEGER DEFAULT 3,
@@ -107,9 +129,8 @@ CREATE TABLE IF NOT EXISTS scope_configs (
     PRIMARY KEY (scope_type, scope_key)
 );
 
--- 巩固抽取失败的备份：LLM 输出连续无法解析时，本批轮次仍会标记已处理，
--- 抽取内容随之静默丢失；此处留存轮次 id 与原始输出供事后排查/人工恢复。
--- 原始轮次在 raw_turns 中保留至 TTL 清理，turn_ids 可用于定位或重放。
+-- Legacy failure records are retained and migrated once into work_items.
+-- New failures quarantine their source turns until an explicit retry.
 CREATE TABLE IF NOT EXISTS consolidation_failures (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     scope_type TEXT NOT NULL,
@@ -118,6 +139,28 @@ CREATE TABLE IF NOT EXISTS consolidation_failures (
     llm_output TEXT,
     created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS scope_versions (
+    scope_type TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope_type, scope_key)
+);
+CREATE TABLE IF NOT EXISTS work_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    scope_type TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    raw_ids TEXT NOT NULL,
+    raw_id INTEGER,
+    payload TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    error TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_work_status ON work_items(kind, status, id);
 """
 
 
@@ -127,10 +170,38 @@ class MemoryStore:
     def __init__(self, db_path: str | Path):
         self.db_path = str(db_path)
         self.connection: aiosqlite.Connection | None = None
+        self._lock = asyncio.Lock()
+        self._owner: asyncio.Task | None = None
+        self.config_revision = 0
+        self.generations: dict[tuple[str, str], int] = {}
         # scope_configs 仅在 WebUI 编辑时变更，而捕获/召回路径每条消息都会读取，
         # 用内存缓存换掉每条消息一次的 DB 往返；写路径负责同步失效
         self._scope_config_cache: dict[tuple[str, str], dict[str, Any]] = {}
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+
+    @asynccontextmanager
+    async def transaction(self):
+        """Commit a complete operation, rolling back on failure or cancellation.
+
+        Yields:
+            The store with exclusive, task-reentrant connection access.
+        """
+        if self._owner is asyncio.current_task():
+            yield self
+            return
+        async with self._lock:
+            self._owner = asyncio.current_task()
+            try:
+                yield self
+                if self.connection:
+                    await self.connection.commit()
+            except BaseException:
+                if self.connection:
+                    await self.connection.rollback()
+                self._scope_config_cache.clear()
+                raise
+            finally:
+                self._owner = None
 
     async def initialize(self) -> None:
         self.connection = await aiosqlite.connect(self.db_path)
@@ -147,13 +218,54 @@ class MemoryStore:
                 "ALTER TABLE memories ADD COLUMN memory_key TEXT"
             )
             logger.info("[Memoir] 已为 memories 表补充 memory_key 列")
+        if "subject_id" not in columns:
+            await self.connection.execute(
+                "ALTER TABLE memories ADD COLUMN subject_id TEXT NOT NULL DEFAULT ''"
+            )
+            await self.connection.execute(
+                "UPDATE memories SET subject_id = 'legacy:' || subject WHERE scope_type = 'group' AND subject IS NOT NULL"
+            )
+        await self.connection.execute("DROP INDEX IF EXISTS idx_memories_scope_key")
         await self.connection.execute(
             """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_scope_key
-                ON memories(scope_type, scope_key, memory_key)
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_owner_key
+                ON memories(scope_type, scope_key, memory_type, subject_id, memory_key)
                 WHERE memory_key IS NOT NULL
             """
         )
+        cursor = await self.connection.execute("PRAGMA table_info(scopes)")
+        if "umo" not in {row[1] for row in await cursor.fetchall()}:
+            await self.connection.execute("ALTER TABLE scopes ADD COLUMN umo TEXT")
+        await self.connection.execute(
+            "UPDATE work_items SET status = 'pending' WHERE kind = 'media' AND status = 'running'"
+        )
+        cursor = await self.connection.execute(
+            "PRAGMA table_info(consolidation_failures)"
+        )
+        if "migrated" not in {row[1] for row in await cursor.fetchall()}:
+            await self.connection.execute(
+                "ALTER TABLE consolidation_failures ADD COLUMN migrated INTEGER NOT NULL DEFAULT 0"
+            )
+        cursor = await self.connection.execute(
+            "SELECT * FROM consolidation_failures WHERE migrated=0"
+        )
+        for failure in await cursor.fetchall():
+            await self.connection.execute(
+                "INSERT INTO work_items(kind,scope_type,scope_key,raw_ids,payload,status,error,attempts,created_at,updated_at) VALUES('consolidation',?,?,?,?,'failed',?,2,?,?)",
+                (
+                    failure["scope_type"],
+                    failure["scope_key"],
+                    failure["turn_ids"],
+                    json.dumps({"output": (failure["llm_output"] or "")[:4000]}),
+                    "Legacy consolidation failed; retry while source turns remain available",
+                    failure["created_at"],
+                    failure["created_at"],
+                ),
+            )
+            await self.connection.execute(
+                "UPDATE consolidation_failures SET migrated=1 WHERE id=?",
+                (failure["id"],),
+            )
         # 旧版本（0.1.0）通过 LLM 逐轮抽取情景记忆，新架构改为原始轮次落库，
         # episodic 不再产生，历史数据一次性清理，由衰减机制交给遗忘流程的语义记忆替代
         cursor = await self.connection.execute(
@@ -191,8 +303,241 @@ class MemoryStore:
             await self.connection.close()
             self.connection = None
 
+    @serialized
+    async def get_revision(self, scope_type: str, scope_key: str) -> int:
+        """Read the generation used to invalidate in-flight work.
+
+        Args:
+            scope_type: Conversation type.
+            scope_key: Conversation identifier.
+
+        Returns:
+            The current persistent generation, initially zero.
+        """
+        cursor = await self.connection.execute(
+            "SELECT revision FROM scope_versions WHERE scope_type=? AND scope_key=?",
+            (scope_type, scope_key),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    @serialized
+    async def bump_revision(self, scope_type: str, scope_key: str) -> None:
+        """Invalidate work that started before a destructive operation.
+
+        Args:
+            scope_type: Conversation type.
+            scope_key: Conversation identifier.
+        """
+        key = (scope_type, scope_key)
+        self.generations[key] = self.generations.get(key, 0) + 1
+        await self.connection.execute(
+            "INSERT INTO scope_versions(scope_type, scope_key, revision) VALUES(?,?,1) ON CONFLICT(scope_type,scope_key) DO UPDATE SET revision=revision+1",
+            (scope_type, scope_key),
+        )
+
+    @serialized
+    async def get_umo(self, scope_type: str, scope_key: str) -> str | None:
+        """Resolve the last captured AstrBot session for provider selection.
+
+        Args:
+            scope_type: Conversation type.
+            scope_key: Conversation identifier.
+
+        Returns:
+            The original session identifier, if captured by this version.
+        """
+        cursor = await self.connection.execute(
+            "SELECT umo FROM scopes WHERE scope_type=? AND scope_key=?",
+            (scope_type, scope_key),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else None
+
+    @serialized
+    async def record_work(
+        self,
+        kind: str,
+        scope_type: str,
+        scope_key: str,
+        raw_ids: list[int],
+        *,
+        payload: dict | None = None,
+        error: str = "",
+    ) -> int:
+        """Persist media work or a quarantined consolidation failure.
+
+        Args:
+            kind: Media or consolidation.
+            scope_type: Conversation type.
+            scope_key: Conversation identifier.
+            raw_ids: Source turn identifiers.
+            payload: Temporary attachment references or bounded diagnostics.
+            error: Failure reason; empty means ready for processing.
+
+        Returns:
+            Work identifier.
+        """
+        now = int(time.time())
+        if kind == "media" and not error:
+            cursor = await self.connection.execute(
+                "SELECT COUNT(*) FROM work_items WHERE kind='media' AND status IN ('pending','running')"
+            )
+            if (await cursor.fetchone())[0] >= 32:
+                error = "Media queue is full; retry when capacity is available"
+        cursor = await self.connection.execute(
+            "INSERT INTO work_items(kind,scope_type,scope_key,raw_ids,raw_id,payload,status,error,attempts,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                kind,
+                scope_type,
+                scope_key,
+                json.dumps(raw_ids),
+                raw_ids[0] if kind == "media" else None,
+                json.dumps(payload or {}, ensure_ascii=False),
+                "failed" if error else "pending",
+                error[:300],
+                (payload or {}).get("attempts", 0),
+                now,
+                now,
+            ),
+        )
+        return cursor.lastrowid
+
+    @serialized
+    async def retry_work(self, work_id: int, scope_type: str, scope_key: str) -> bool:
+        """Requeue failed work only while its original source still exists.
+
+        Args:
+            work_id: Failed work identifier.
+            scope_type: Conversation type required to authorize this operation.
+            scope_key: Conversation identifier required to authorize this operation.
+
+        Returns:
+            Whether work was requeued.
+        """
+        cursor = await self.connection.execute(
+            "SELECT * FROM work_items WHERE id=? AND scope_type=? AND scope_key=? AND status='failed'",
+            (work_id, scope_type, scope_key),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return False
+        ids = json.loads(row["raw_ids"])
+        if not ids:
+            return False
+        cursor = await self.connection.execute(
+            f"SELECT COUNT(*) FROM raw_turns WHERE scope_type=? AND scope_key=? AND id IN ({','.join('?' for _ in ids)})",
+            (scope_type, scope_key, *ids),
+        )
+        if (await cursor.fetchone())[0] != len(ids):
+            return False
+        if row["kind"] == "media":
+            cursor = await self.connection.execute(
+                "SELECT COUNT(*) FROM work_items WHERE kind='media' AND status IN ('pending','running')"
+            )
+            if (await cursor.fetchone())[0] >= 32:
+                return False
+            payload = json.loads(row["payload"])
+            payload["revision"] = await self.get_revision(scope_type, scope_key)
+            await self.connection.execute(
+                "UPDATE work_items SET status='pending',error='',payload=?,updated_at=? WHERE id=?",
+                (json.dumps(payload, ensure_ascii=False), int(time.time()), work_id),
+            )
+        else:
+            await self.connection.execute(
+                f"UPDATE raw_turns SET extracted=0 WHERE id IN ({','.join('?' for _ in ids)})",
+                ids,
+            )
+            await self.connection.execute(
+                "DELETE FROM work_items WHERE id=?", (work_id,)
+            )
+            await self.connection.execute(
+                "UPDATE scopes SET last_consolidated_at=1 WHERE scope_type=? AND scope_key=?",
+                (scope_type, scope_key),
+            )
+        return True
+
+    @serialized
+    async def get_processing_status(self, scope_type: str, scope_key: str) -> dict:
+        """Read bounded operational diagnostics without exposing media references.
+
+        Args:
+            scope_type: Conversation type.
+            scope_key: Conversation identifier.
+
+        Returns:
+            Counts, oldest pending age, and recent failures for this scope.
+        """
+        cursor = await self.connection.execute(
+            "SELECT kind,status,COUNT(*) AS count FROM work_items WHERE scope_type=? AND scope_key=? GROUP BY kind,status",
+            (scope_type, scope_key),
+        )
+        counts = [dict(row) for row in await cursor.fetchall()]
+        cursor = await self.connection.execute(
+            "SELECT MIN(created_at) FROM raw_turns WHERE scope_type=? AND scope_key=? AND extracted=0",
+            (scope_type, scope_key),
+        )
+        oldest = (await cursor.fetchone())[0]
+        cursor = await self.connection.execute(
+            "SELECT id,kind,status,error,attempts,created_at,updated_at,raw_ids FROM work_items WHERE scope_type=? AND scope_key=? AND status='failed' ORDER BY id DESC LIMIT 30",
+            (scope_type, scope_key),
+        )
+        failures = [dict(row) for row in await cursor.fetchall()]
+        for failure in failures:
+            ids = json.loads(failure.pop("raw_ids"))
+            cursor = await self.connection.execute(
+                f"SELECT COUNT(*) FROM raw_turns WHERE id IN ({','.join('?' for _ in ids)}) AND scope_type=? AND scope_key=?",
+                (*ids, scope_type, scope_key),
+            )
+            failure["retryable"] = bool(ids) and (await cursor.fetchone())[0] == len(
+                ids
+            )
+        return {
+            "counts": counts,
+            "oldest_pending_seconds": max(0, int(time.time()) - oldest)
+            if oldest
+            else 0,
+            "failures": failures,
+        }
+
+    @serialized
+    async def get_memory_sources(
+        self, memory_id: int, scope_type: str, scope_key: str
+    ) -> dict | None:
+        """Read available source turns, scoped to the selected memory.
+
+        Args:
+            memory_id: Memory identifier.
+            scope_type: Conversation type.
+            scope_key: Conversation identifier.
+
+        Returns:
+            Available source text and an expired count, or None if not found.
+        """
+        cursor = await self.connection.execute(
+            "SELECT source_ref FROM memories WHERE id=? AND scope_type=? AND scope_key=?",
+            (memory_id, scope_type, scope_key),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        try:
+            ids = json.loads(row[0] or "[]")
+            ids = (
+                [i for i in ids if isinstance(i, int)] if isinstance(ids, list) else []
+            )
+        except (ValueError, TypeError):
+            ids = []
+        cursor = await self.connection.execute(
+            f"SELECT id,content,speaker_name,created_at FROM raw_turns WHERE id IN ({','.join('?' for _ in ids)}) AND scope_type=? AND scope_key=? ORDER BY id",
+            (*ids, scope_type, scope_key),
+        )
+        items = [dict(item) for item in await cursor.fetchall()]
+        return {"items": items, "expired": len(ids) - len(items), "tracked": bool(ids)}
+
     # ==================== scopes ====================
 
+    @serialized
     async def mark_scope_consolidated(self, scope_type: str, scope_key: str) -> None:
         if self.connection is None:
             return
@@ -201,8 +546,8 @@ class MemoryStore:
             "UPDATE scopes SET last_consolidated_at = ? WHERE scope_type = ? AND scope_key = ?",
             (now, scope_type, scope_key),
         )
-        await self.connection.commit()
 
+    @serialized
     async def get_scope_activity(self) -> list[dict[str, Any]]:
         """返回所有 scope 及其待抽取原文数量（巩固触发的数据源）"""
         if self.connection is None:
@@ -221,6 +566,7 @@ class MemoryStore:
 
     # ==================== memories ====================
 
+    @serialized
     async def insert_memory(
         self,
         *,
@@ -229,6 +575,7 @@ class MemoryStore:
         memory_type: str,
         content: str,
         subject: str | None = None,
+        subject_id: str = "",
         memory_key: str | None = None,
         tags: str | None = None,
         importance: int = 3,
@@ -250,71 +597,29 @@ class MemoryStore:
         if self.connection is None:
             raise RuntimeError("数据库连接未初始化")
         now = int(time.time())
-        if memory_key:
-            try:
-                cursor = await self.connection.execute(
-                    """
-                    INSERT INTO memories (
-                        scope_type, scope_key, memory_type, memory_key, subject, content, tags,
-                        importance, sensitivity_level, sensitivity_category,
-                        source_type, source_ref,
-                        created_at, updated_at, expire_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        scope_type,
-                        scope_key,
-                        memory_type,
-                        memory_key,
-                        subject,
-                        content,
-                        tags,
-                        importance,
-                        sensitivity_level,
-                        sensitivity_category,
-                        source_type,
-                        source_ref,
-                        now,
-                        now,
-                        expire_at,
-                    ),
-                )
-                await self.connection.commit()
-                return cursor.lastrowid or 0
-            except aiosqlite.IntegrityError:
-                # 同 scope 下已有相同 key：转为更新既有条目（取最新的陈述覆盖）
-                await self.connection.execute("ROLLBACK")
-                cursor = await self.connection.execute(
-                    "SELECT id FROM memories WHERE scope_type = ? AND scope_key = ? AND memory_key = ?",
-                    (scope_type, scope_key, memory_key),
-                )
-                row = await cursor.fetchone()
-                if row is None:
-                    raise
-                await self.update_memory_content(
-                    row["id"],
-                    content,
-                    importance=importance,
-                    tags=tags,
-                )
-                logger.debug(
-                    f"[Memoir] memory_key 冲突转为更新: {scope_key}/{memory_key}"
-                )
-                return row["id"]
         cursor = await self.connection.execute(
             """
             INSERT INTO memories (
-                scope_type, scope_key, memory_type, subject, content, tags,
+                scope_type, scope_key, memory_type, subject, subject_id, memory_key, content, tags,
                 importance, sensitivity_level, sensitivity_category,
                 source_type, source_ref,
                 created_at, updated_at, expire_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scope_type, scope_key, memory_type, subject_id, memory_key)
+                WHERE memory_key IS NOT NULL
+            DO UPDATE SET content = excluded.content, subject = excluded.subject,
+                tags = excluded.tags, importance = excluded.importance,
+                source_ref = excluded.source_ref, source_type = excluded.source_type,
+                strength = 1.0, updated_at = excluded.updated_at
             """,
             (
                 scope_type,
                 scope_key,
                 memory_type,
                 subject,
+                subject_id
+                or (f"legacy:{subject}" if scope_type == "group" and subject else ""),
+                memory_key,
                 content,
                 tags,
                 importance,
@@ -327,9 +632,24 @@ class MemoryStore:
                 expire_at,
             ),
         )
-        await self.connection.commit()
+        if memory_key:
+            cursor = await self.connection.execute(
+                "SELECT id FROM memories WHERE scope_type=? AND scope_key=? AND memory_type=? AND subject_id=? AND memory_key=?",
+                (
+                    scope_type,
+                    scope_key,
+                    memory_type,
+                    subject_id
+                    or (
+                        f"legacy:{subject}" if scope_type == "group" and subject else ""
+                    ),
+                    memory_key,
+                ),
+            )
+            return (await cursor.fetchone())["id"]
         return cursor.lastrowid or 0
 
+    @serialized
     async def update_memory_content(
         self,
         memory_id: int,
@@ -337,6 +657,7 @@ class MemoryStore:
         importance: int | None = None,
         tags: str | None = None,
         memory_key: str | None = None,
+        source_ref: str | None = None,
     ) -> None:
         """直接覆盖更新（当前版本的语义记忆更新策略）。
 
@@ -352,6 +673,9 @@ class MemoryStore:
         now = int(time.time())
         sets = ["content = ?", "strength = 1.0", "updated_at = ?"]
         params: list[Any] = [content, now]
+        if source_ref is not None:
+            sets.append("source_ref = ?")
+            params.append(source_ref)
         if importance is not None:
             sets.append("importance = ?")
             params.append(importance)
@@ -364,9 +688,11 @@ class MemoryStore:
                 SELECT id FROM memories
                 WHERE scope_type = (SELECT scope_type FROM memories WHERE id = ?)
                   AND scope_key = (SELECT scope_key FROM memories WHERE id = ?)
+                  AND subject_id = (SELECT subject_id FROM memories WHERE id = ?)
+                  AND memory_type = (SELECT memory_type FROM memories WHERE id = ?)
                   AND memory_key = ? AND id != ?
                 """,
-                (memory_id, memory_id, memory_key, memory_id),
+                (memory_id, memory_id, memory_id, memory_id, memory_key, memory_id),
             )
             if await cursor.fetchone() is None:
                 sets.append("memory_key = ?")
@@ -379,8 +705,8 @@ class MemoryStore:
         await self.connection.execute(
             f"UPDATE memories SET {', '.join(sets)} WHERE id = ?", params
         )
-        await self.connection.commit()
 
+    @serialized
     async def insert_raw_turn(
         self,
         *,
@@ -389,6 +715,7 @@ class MemoryStore:
         content: str,
         speaker_id: str | None = None,
         speaker_name: str | None = None,
+        umo: str | None = None,
     ) -> int:
         """原始对话轮次落库（零 LLM 成本），并在同一事务内更新会话活跃时间。
 
@@ -430,9 +757,14 @@ class MemoryStore:
             """,
             (scope_type, scope_key, now, now),
         )
-        await self.connection.commit()
+        if umo:
+            await self.connection.execute(
+                "UPDATE scopes SET umo=? WHERE scope_type=? AND scope_key=?",
+                (umo, scope_type, scope_key),
+            )
         return cursor.lastrowid or 0
 
+    @serialized
     async def get_pending_raw(
         self, scope_type: str, scope_key: str, limit: int = 60
     ) -> list[dict[str, Any]]:
@@ -443,6 +775,7 @@ class MemoryStore:
             """
             SELECT * FROM raw_turns
             WHERE scope_type = ? AND scope_key = ? AND extracted = 0
+              AND NOT EXISTS (SELECT 1 FROM work_items w WHERE w.raw_id=raw_turns.id AND w.kind='media' AND w.status IN ('pending','running'))
             ORDER BY created_at ASC, id ASC
             LIMIT ?
             """,
@@ -451,6 +784,7 @@ class MemoryStore:
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    @serialized
     async def mark_raw_extracted(self, turn_ids: list[int]) -> None:
         if self.connection is None or not turn_ids:
             return
@@ -459,8 +793,8 @@ class MemoryStore:
             f"UPDATE raw_turns SET extracted = 1 WHERE id IN ({placeholders})",
             turn_ids,
         )
-        await self.connection.commit()
 
+    @serialized
     async def record_consolidation_failure(
         self,
         scope_type: str,
@@ -496,8 +830,8 @@ class MemoryStore:
                 int(time.time()),
             ),
         )
-        await self.connection.commit()
 
+    @serialized
     async def get_semantic_memories(
         self, scope_type: str, scope_key: str, limit: int = 100
     ) -> list[dict[str, Any]]:
@@ -515,6 +849,7 @@ class MemoryStore:
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    @serialized
     async def search_memories(
         self,
         scope_type: str,
@@ -549,7 +884,9 @@ class MemoryStore:
         where_clause = " OR ".join(
             ["(content LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"] * len(terms)
         )
-        subject_boost = "(CASE WHEN subject = ? THEN 2 ELSE 0 END)"
+        subject_boost = (
+            "(CASE WHEN subject_id = ? AND subject_id != '' THEN 2 ELSE 0 END)"
+        )
 
         # 精确通道加分项：等值/整句命中直接叠加进相关性
         exact_parts: list[str] = []
@@ -589,7 +926,7 @@ class MemoryStore:
         params: list[Any] = []
         params.extend(likes)  # content_hits
         params.extend(likes)  # tag_hits
-        params.append(boost_subject or "")  # subject_boost（空串不匹配任何 subject）
+        params.append(boost_subject or "")
         params.extend(exact_params)  # 精确通道
         for like in likes:  # where OR pairs
             params.extend([like, like])
@@ -598,6 +935,7 @@ class MemoryStore:
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    @serialized
     async def get_core_memories(
         self, scope_type: str, scope_key: str, limit: int = 3
     ) -> list[dict[str, Any]]:
@@ -619,6 +957,7 @@ class MemoryStore:
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    @serialized
     async def search_raw(
         self,
         scope_type: str,
@@ -680,6 +1019,7 @@ class MemoryStore:
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    @serialized
     async def get_recent_raw(
         self, scope_type: str, scope_key: str, limit: int = 5
     ) -> list[dict[str, Any]]:
@@ -698,6 +1038,7 @@ class MemoryStore:
             rows = await cursor.fetchall()
         return list(reversed([dict(row) for row in rows]))
 
+    @serialized
     async def prune_raw(self, ttl_seconds: int, cap_per_scope: int = 500) -> int:
         """遗忘原始轮次：超过 TTL 的全局清理；对仍保留的按 scope 容量上限裁剪。
 
@@ -706,12 +1047,14 @@ class MemoryStore:
         """
         if self.connection is None:
             return 0
-        cutoff = int(time.time()) - max(ttl_seconds, 3600)
-        cursor = await self.connection.execute(
-            "DELETE FROM raw_turns WHERE created_at < ?",
-            (cutoff,),
-        )
-        deleted = cursor.rowcount or 0
+        deleted = 0
+        if ttl_seconds > 0:
+            cutoff = int(time.time()) - ttl_seconds
+            cursor = await self.connection.execute(
+                "DELETE FROM raw_turns WHERE created_at < ?",
+                (cutoff,),
+            )
+            deleted = cursor.rowcount or 0
         async with self.connection.execute(
             "SELECT DISTINCT scope_type, scope_key FROM raw_turns"
         ) as cursor:
@@ -736,9 +1079,9 @@ class MemoryStore:
                 ),
             )
             deleted += cap_cursor.rowcount or 0
-        await self.connection.commit()
         return deleted
 
+    @serialized
     async def cap_raw(self, scope_type: str, scope_key: str, cap: int) -> int:
         """单 scope 原始轮次容量裁剪：只保留最近 cap 条，返回删除条数"""
         if self.connection is None:
@@ -755,9 +1098,9 @@ class MemoryStore:
             """,
             (scope_type, scope_key, scope_type, scope_key, cap),
         )
-        await self.connection.commit()
         return cursor.rowcount or 0
 
+    @serialized
     async def prune_semantic(self, scope_type: str, scope_key: str, cap: int) -> int:
         """结构化记忆容量裁剪：超出 cap 时按召回优先级淘汰，返回删除条数。
 
@@ -789,9 +1132,9 @@ class MemoryStore:
             """,
             (scope_type, scope_key, scope_type, scope_key, cap),
         )
-        await self.connection.commit()
         return cursor.rowcount or 0
 
+    @serialized
     async def get_scope_memories(
         self, scope_type: str, scope_key: str, limit: int = 10, offset: int = 0
     ) -> list[dict[str, Any]]:
@@ -800,7 +1143,7 @@ class MemoryStore:
             return []
         async with self.connection.execute(
             """
-            SELECT id, memory_type, memory_key, subject, content, tags, importance, strength, updated_at
+            SELECT id, memory_type, memory_key, subject, subject_id, source_type, source_ref, content, tags, importance, strength, updated_at
             FROM memories
             WHERE scope_type = ? AND scope_key = ?
             ORDER BY updated_at DESC
@@ -811,6 +1154,7 @@ class MemoryStore:
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    @serialized
     async def get_scope_stats(self, scope_type: str, scope_key: str) -> dict[str, int]:
         """按类型统计 scope 内记忆数量（含未抽取的原始轮次）"""
         if self.connection is None:
@@ -834,6 +1178,7 @@ class MemoryStore:
             stats["raw"] = row["n"]
         return stats
 
+    @serialized
     async def list_scopes(self) -> list[dict[str, Any]]:
         """列出所有 scope 及其记忆/原文统计（按最近活跃倒序），供 WebUI 概览"""
         if self.connection is None:
@@ -855,6 +1200,7 @@ class MemoryStore:
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    @serialized
     async def get_raw_turns(
         self, scope_type: str, scope_key: str, limit: int = 20, offset: int = 0
     ) -> tuple[list[dict[str, Any]], int]:
@@ -879,6 +1225,7 @@ class MemoryStore:
             rows = await cursor.fetchall()
         return [dict(row) for row in rows], total
 
+    @serialized
     async def count_scope_memories(self, scope_type: str, scope_key: str) -> int:
         """统计 scope 内结构化记忆总数，供 WebUI 分页"""
         if self.connection is None:
@@ -890,6 +1237,7 @@ class MemoryStore:
             row = await cursor.fetchone()
         return row["n"] if row else 0
 
+    @serialized
     async def delete_raw_turn_in_scope(
         self, turn_id: int, scope_type: str, scope_key: str
     ) -> bool:
@@ -900,9 +1248,9 @@ class MemoryStore:
             "DELETE FROM raw_turns WHERE id = ? AND scope_type = ? AND scope_key = ?",
             (turn_id, scope_type, scope_key),
         )
-        await self.connection.commit()
         return (cursor.rowcount or 0) > 0
 
+    @serialized
     async def list_bridge_consents(self) -> list[dict[str, Any]]:
         """列出全部桥接授权记录（按更新时间倒序），供 WebUI 管理"""
         if self.connection is None:
@@ -915,6 +1263,7 @@ class MemoryStore:
 
     # ==================== scope configs ====================
 
+    @serialized
     async def get_scope_config(self, scope_type: str, scope_key: str) -> dict[str, Any]:
         """读取会话级配置覆盖，无覆盖时返回空 dict（结果缓存，写路径失效）"""
         cache_key = (scope_type, scope_key)
@@ -938,6 +1287,7 @@ class MemoryStore:
         self._scope_config_cache[cache_key] = data
         return data
 
+    @serialized
     async def get_all_scope_configs(self) -> dict[tuple[str, str], dict[str, Any]]:
         """一次性读取全部会话配置覆盖，供巩固扫描按 scope 取阈值（同时刷新缓存）"""
         if self.connection is None:
@@ -957,12 +1307,14 @@ class MemoryStore:
         self._scope_config_cache = result
         return result
 
+    @serialized
     async def set_scope_config(
         self, scope_type: str, scope_key: str, config: dict[str, Any]
     ) -> None:
         """写入会话配置覆盖；config 为空时删除覆盖（完全继承全局）。同步维护缓存"""
         if self.connection is None:
             return
+        await self.bump_revision(scope_type, scope_key)
         cache_key = (scope_type, scope_key)
         if config:
             await self.connection.execute(
@@ -985,25 +1337,51 @@ class MemoryStore:
                 (scope_type, scope_key),
             )
             self._scope_config_cache.pop(cache_key, None)
-        await self.connection.commit()
 
+    @serialized
     async def delete_memory_in_scope(
-        self, memory_id: int, scope_type: str, scope_key: str
+        self,
+        memory_id: int,
+        scope_type: str,
+        scope_key: str,
+        *,
+        invalidate: bool = True,
     ) -> bool:
-        """删除指定 id 且属于该 scope 的记忆，返回是否删除成功（防止跨 scope 删除）"""
+        """Delete a memory only within its owning conversation.
+
+        Args:
+            memory_id: Memory identifier.
+            scope_type: Conversation type.
+            scope_key: Conversation identifier.
+            invalidate: Reject in-flight results after an explicit user deletion.
+
+        Returns:
+            Whether the selected memory was deleted.
+        """
         if self.connection is None:
             return False
+        if invalidate:
+            await self.bump_revision(scope_type, scope_key)
         cursor = await self.connection.execute(
             "DELETE FROM memories WHERE id = ? AND scope_type = ? AND scope_key = ?",
             (memory_id, scope_type, scope_key),
         )
-        await self.connection.commit()
         return (cursor.rowcount or 0) > 0
 
+    @serialized
     async def delete_scope_memories(self, scope_type: str, scope_key: str) -> int:
         """删除 scope 下全部记忆与原始轮次（forget_me），返回删除条数"""
         if self.connection is None:
             return 0
+        await self.bump_revision(scope_type, scope_key)
+        await self.connection.execute(
+            "DELETE FROM work_items WHERE scope_type=? AND scope_key=?",
+            (scope_type, scope_key),
+        )
+        await self.connection.execute(
+            "DELETE FROM consolidation_failures WHERE scope_type=? AND scope_key=?",
+            (scope_type, scope_key),
+        )
         cursor = await self.connection.execute(
             "DELETE FROM memories WHERE scope_type = ? AND scope_key = ?",
             (scope_type, scope_key),
@@ -1018,9 +1396,9 @@ class MemoryStore:
             "DELETE FROM scopes WHERE scope_type = ? AND scope_key = ?",
             (scope_type, scope_key),
         )
-        await self.connection.commit()
         return deleted
 
+    @serialized
     async def reinforce_memories(self, memory_ids: list[int]) -> None:
         """召回命中后强化：重置强度为 1.0 并刷新激活时间（模拟越常被想起的记忆越难忘）。
 
@@ -1034,8 +1412,8 @@ class MemoryStore:
             f"UPDATE memories SET strength = 1.0, updated_at = ? WHERE id IN ({placeholders})",
             (int(time.time()), *memory_ids),
         )
-        await self.connection.commit()
 
+    @serialized
     async def decay_and_forget(
         self, decay_rate_semantic: float, decay_rate_insight: float
     ) -> None:
@@ -1100,10 +1478,10 @@ class MemoryStore:
             await self.connection.executemany(
                 "UPDATE memories SET strength = ? WHERE id = ?", updates
             )
-        await self.connection.commit()
 
     # ==================== bridge consent ====================
 
+    @serialized
     async def is_bridge_enabled(self, platform: str, sender_id: str) -> bool:
         if self.connection is None:
             return False
@@ -1114,6 +1492,7 @@ class MemoryStore:
             row = await cursor.fetchone()
         return bool(row and row["enabled"])
 
+    @serialized
     async def set_bridge_enabled(
         self, platform: str, sender_id: str, enabled: bool
     ) -> None:
@@ -1128,4 +1507,3 @@ class MemoryStore:
             """,
             (platform, sender_id, int(enabled), now),
         )
-        await self.connection.commit()

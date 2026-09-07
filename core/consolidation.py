@@ -20,7 +20,9 @@ insert 强制携带 memory_key（同类:主题 slug），与既有 key 撞车时
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+from types import SimpleNamespace
 
 from astrbot.api import logger
 
@@ -71,6 +73,8 @@ _CONSOLIDATION_SYSTEM_PROMPT = """你是记忆巩固模块。请把用户消息�
    - 带 [洞察] 标记的条目同样参与 update/expire：不再成立的洞察应改写或删除
 
    key 规则（key 是「关于什么事」的唯一标识，用于防止同一事实重复建条）：
+   - 群聊 insert 必须携带 subject_id，从原文 sender_id 选择；群公共事实填 null。不能用昵称代替 ID。
+   - insert/update 可携带 source_turn_ids，填支持该事实的原文 id 数组。
    - insert 必须携带 key，格式为 类别:主题（小写英文 slug），如 user:job、pet:dog、
      event:2026-09-07:beijing-trip；同一事实永远对应同一个 key
    - 上方已有记忆中带 [key] 的条目就是该事实的既有 key：内容变化时必须用
@@ -90,7 +94,7 @@ _CONSOLIDATION_SYSTEM_PROMPT = """你是记忆巩固模块。请把用户消息�
 {{
   "semantic_ops": [
     {{"action": "update", "target_id": 12, "content": "新的认知内容", "key": "目标条目无 key 时回填，可选", "tags": "主题变化时给出新关键词，可选", "importance": 1-5}},
-    {{"action": "insert", "key": "user:job", "content": "[YYYY-MM-DD] 新的认知内容", "tags": "关键词,同义表达,上位词", "subject": "事实所属的说话人名字，群聊必填，私聊填 null", "importance": 1-5}},
+    {{"action": "insert", "key": "user:job", "content": "[YYYY-MM-DD] 新的认知内容", "tags": "关键词,同义表达,上位词", "subject": "显示名，可选", "subject_id": "群聊个人事实填原文 sender_id，全群事实和私聊填 null", "importance": 1-5}},
     {{"action": "expire", "target_id": 12}}
   ],
   "insight": {{"content": "洞察内容", "importance": 1-5}} 或 null,
@@ -153,7 +157,8 @@ def _format_semantic_block(structured_memories: list[dict]) -> str:
     for m in structured_memories:
         marker = "[洞察] " if m["memory_type"] == "insight" else ""
         key = f" [{m['memory_key']}]" if m.get("memory_key") else ""
-        lines.append(f"[#{m['id']}]{key} {marker}{m['content']}")
+        owner = f" [subject_id={m['subject_id']}]" if m.get("subject_id") else ""
+        lines.append(f"[#{m['id']}]{key} {marker}{m['content']}{owner}")
     return "\n".join(lines) if lines else "（暂无）"
 
 
@@ -201,97 +206,249 @@ async def _get_related_memories(
 def _format_raw_block(raw_turns: list[dict]) -> str:
     lines = []
     for t in raw_turns:
-        speaker = f"{t['speaker_name']}: " if t.get("speaker_name") else ""
+        speaker = f"{t.get('speaker_name') or 'unknown'} [sender_id={t.get('speaker_id') or 'none'}]: "
         lines.append(
             f"[#{t['id']}] [{_format_time(t['created_at'])}] {speaker}{t['content']}"
         )
     return "\n".join(lines) if lines else "（暂无）"
 
 
+def _validate_consolidation(
+    parsed, raw_turns: list[dict], structured: list[dict], scope_type: str
+) -> str:
+    """Validate the complete batch before any database mutation.
+
+    Args:
+        parsed: Parsed model output.
+        raw_turns: Permitted source turns.
+        structured: Permitted update targets.
+        scope_type: Conversation type.
+
+    Returns:
+        An actionable validation error, or an empty string for valid output.
+    """
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("semantic_ops"), list):
+        return "Missing semantic_ops array"
+    ids = {row["id"] for row in raw_turns}
+    targets = {row["id"]: row for row in structured}
+    speakers = {row.get("speaker_id") for row in raw_turns if row.get("speaker_id")}
+    ops = parsed["semantic_ops"]
+    if len(ops) > 100:
+        return "Too many memory operations"
+    for op in ops:
+        if not isinstance(op, dict) or op.get("action") not in {
+            "insert",
+            "update",
+            "expire",
+            "ignore",
+        }:
+            return "Invalid memory action"
+        action = op["action"]
+        if action == "ignore":
+            continue
+        if action in {"update", "expire"} and (
+            type(op.get("target_id")) is not int or op["target_id"] not in targets
+        ):
+            return "Unknown memory target"
+        if action in {"insert", "update"}:
+            if not isinstance(op.get("content"), str) or not op["content"].strip():
+                return "Missing memory content"
+            if action == "insert" and (
+                not isinstance(op.get("key"), str) or not op["key"].strip()
+            ):
+                return "Missing unique memory key"
+            if "importance" in op and (
+                type(op["importance"]) is not int or not 1 <= op["importance"] <= 5
+            ):
+                return "Importance must be an integer from 1 to 5"
+            if "key" in op and not isinstance(op["key"], str):
+                return "Memory key must be text"
+            if "tags" in op and not isinstance(op["tags"], str):
+                return "Tags must be text"
+            for field in ("subject", "subject_id"):
+                if op.get(field) is not None and not isinstance(op[field], str):
+                    return "Subject and subject_id must be text or null"
+            if scope_type == "group" and action == "insert":
+                if "subject_id" not in op or op["subject_id"] not in speakers | {
+                    None,
+                    "",
+                }:
+                    return "Group facts require a valid subject_id (null for group-wide facts)"
+            source_ids = op.get("source_turn_ids", list(ids))
+            if (
+                not isinstance(source_ids, list)
+                or not source_ids
+                or any(type(i) is not int or i not in ids for i in source_ids)
+            ):
+                return "Invalid source turn identifiers"
+    insight = parsed.get("insight")
+    if insight is not None and (
+        not isinstance(insight, dict)
+        or not isinstance(insight.get("content"), str)
+        or not insight["content"].strip()
+    ):
+        return "Invalid insight"
+    if (
+        isinstance(insight, dict)
+        and "importance" in insight
+        and (
+            type(insight["importance"]) is not int
+            or not 1 <= insight["importance"] <= 5
+        )
+    ):
+        return "Insight importance must be an integer from 1 to 5"
+    statements = parsed.get("self_statements", [])
+    if not isinstance(statements, list):
+        return "Invalid self_statements array"
+    for item in statements:
+        if (
+            not isinstance(item, dict)
+            or type(item.get("turn_id")) is not int
+            or item["turn_id"] not in ids
+            or not isinstance(item.get("content"), str)
+            or not item["content"].strip()
+            or item.get("sensitivity_level") not in {"low", "medium", "high"}
+        ):
+            return "Invalid bridge statement"
+    return ""
+
+
 async def _consolidate_scope(
     context, config: dict, store: MemoryStore, scope_type: str, scope_key: str
 ) -> None:
-    """消化一个 scope 的待抽取轮次：每批一次 LLM 调用，最多连续 _MAX_BATCHES_PER_PASS 批。
+    """Process bounded batches with generation checks and atomic result writes.
 
-    积压时单次扫描可消化 _BATCH_LIMIT×批数 轮；LLM 失败立即停止本 scope，
-    已处理批次照常推进水位，未处理的留待下轮。会话级配置覆盖在此合并
-    （bridge_max_sensitivity / scope_bridge_enabled 等按会话生效）。
+    Args:
+        context: AstrBot provider context.
+        config: Live global configuration.
+        store: Memory storage.
+        scope_type: Conversation type.
+        scope_key: Conversation identifier.
     """
-    override = await store.get_scope_config(scope_type, scope_key)
-    config = merge_scope_config(config, override, scope_type)
-    if not config.get("scope_enabled", True):
-        return
     for _ in range(_MAX_BATCHES_PER_PASS):
-        raw_turns = await store.get_pending_raw(scope_type, scope_key, _BATCH_LIMIT)
-        if not raw_turns:
-            break
-        # 按字符预算截批（保持时间连续性，从最早开始取）：超出预算的轮次
-        # 不进本批，留待后续批次消化；至少保留一条避免单条超长时卡死
-        kept: list[dict] = []
-        batch_chars = 0
-        for turn in raw_turns:
-            turn_chars = len(turn["content"] or "")
-            if kept and batch_chars + turn_chars > _BATCH_CHAR_BUDGET:
-                break
-            kept.append(turn)
-            batch_chars += turn_chars
-        raw_turns = kept
-        structured = await _get_related_memories(
-            store, scope_type, scope_key, raw_turns, config
-        )
-
-        bridge_instruction = (
-            _BRIDGE_INSTRUCTION_GROUP
-            if scope_type == "group"
-            else _BRIDGE_INSTRUCTION_PRIVATE
-        )
+        async with store.transaction():
+            effective = merge_scope_config(
+                config, await store.get_scope_config(scope_type, scope_key), scope_type
+            )
+            if not effective.get("scope_enabled", True) or not effective.get(
+                f"enable_{scope_type}_memory", True
+            ):
+                return
+            revision = await store.get_revision(scope_type, scope_key)
+            config_revision = store.config_revision
+            raw_turns = await store.get_pending_raw(scope_type, scope_key, _BATCH_LIMIT)
+            kept, chars = [], 0
+            for turn in raw_turns:
+                if kept and chars + len(turn["content"]) > _BATCH_CHAR_BUDGET:
+                    break
+                kept.append(turn)
+                chars += len(turn["content"])
+            raw_turns = kept
+            if not raw_turns:
+                return
+            structured = await _get_related_memories(
+                store, scope_type, scope_key, raw_turns, effective
+            )
+            umo = await store.get_umo(scope_type, scope_key)
+            target_revisions = {}
+            if scope_type == "group":
+                for turn in raw_turns:
+                    if turn.get("speaker_id"):
+                        key = private_scope_key(
+                            scope_key.split(":", 1)[0], turn["speaker_id"]
+                        )
+                        target_revisions[key] = await store.get_revision("private", key)
         prompt = _CONSOLIDATION_USER_TEMPLATE.format(
             today=time.strftime("%Y-%m-%d"),
             semantic_block=_format_semantic_block(structured),
             raw_block=_format_raw_block(raw_turns),
         )
         system_prompt = _CONSOLIDATION_SYSTEM_PROMPT.format(
-            bridge_instruction=bridge_instruction
+            bridge_instruction=_BRIDGE_INSTRUCTION_GROUP
+            if scope_type == "group"
+            else _BRIDGE_INSTRUCTION_PRIVATE
         )
-        # 坏输出重试一次再推进水位：解析失败立即放行会静默丢失整批抽取，
-        # 无限重试会卡死水位，单次重试是两者的折中
-        parsed = None
+        parsed, raw, error = None, None, ""
         for _attempt in range(2):
-            raw = await call_background_llm(
-                context, config, prompt=prompt, system_prompt=system_prompt
-            )
-            if raw is None:
-                # LLM 调用失败：不标记已抽取，留待下轮重试；停止继续消化
-                return
-            parsed = parse_json_object(raw)
-            if isinstance(parsed, dict):
+            try:
+                raw = await asyncio.wait_for(
+                    call_background_llm(
+                        context,
+                        dict(effective, _require_session=True),
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        event=SimpleNamespace(unified_msg_origin=umo) if umo else None,
+                    ),
+                    timeout=60,
+                )
+                if raw is None:
+                    error = "Model unavailable or request failed; check the background model and session"
+                    break
+                parsed = parse_json_object(raw)
+                error = _validate_consolidation(
+                    parsed, raw_turns, structured, scope_type
+                )
+            except asyncio.TimeoutError:
+                error = "Consolidation exceeded the 60-second deadline"
                 break
-            logger.warning("[Memoir] 巩固输出无法解析为 JSON，重试一次")
-        else:
-            # 放弃前留档：本批轮次即将标记已处理并最终被 TTL 清理，
-            # 没有这份记录的话整批抽取内容就永久静默丢失了
-            logger.warning(
-                f"[Memoir] 巩固输出连续两次无法解析，本批 {len(raw_turns)} 轮"
-                "仅标记已处理，失败详情已留档 consolidation_failures"
+            except (TypeError, ValueError):
+                error = "Invalid model output types"
+            if not error:
+                break
+        async with store.transaction():
+            if (
+                revision != await store.get_revision(scope_type, scope_key)
+                or config_revision != store.config_revision
+            ):
+                return
+            ids = [turn["id"] for turn in raw_turns]
+            cursor = await store.connection.execute(
+                f"SELECT COUNT(*) FROM raw_turns WHERE id IN ({','.join('?' for _ in ids)}) AND extracted=0",
+                ids,
             )
-            await store.record_consolidation_failure(
-                scope_type, scope_key, [t["id"] for t in raw_turns], raw
+            if (await cursor.fetchone())[0] != len(ids):
+                return
+            if error:
+                await store.record_work(
+                    "consolidation",
+                    scope_type,
+                    scope_key,
+                    ids,
+                    payload={"output": (raw or "")[:4000], "attempts": _attempt + 1},
+                    error=error,
+                )
+                await store.connection.execute(
+                    f"UPDATE raw_turns SET extracted=-1 WHERE id IN ({','.join('?' for _ in ids)})",
+                    ids,
+                )
+                logger.warning("[Memoir] Consolidation quarantined: %s", error)
+                return
+            source_ref = json.dumps(ids)
+            await _apply_semantic_ops(
+                store,
+                scope_type,
+                scope_key,
+                parsed,
+                structured,
+                source_ref=source_ref,
+                raw_turns=raw_turns,
             )
-
-        turn_map = {t["id"]: t for t in raw_turns}
-        if isinstance(parsed, dict):
-            await _apply_semantic_ops(store, scope_type, scope_key, parsed, structured)
-            await _apply_insight(store, scope_type, scope_key, parsed)
+            await _apply_insight(
+                store, scope_type, scope_key, parsed, source_ref=source_ref
+            )
             if scope_type == "group":
                 await _bridge_self_statements(
-                    config, store, scope_key, parsed, turn_map
+                    effective,
+                    store,
+                    scope_key,
+                    parsed,
+                    {t["id"]: t for t in raw_turns},
+                    target_revisions=target_revisions,
                 )
-
-        # 无论抽取结果如何，只要 LLM 成功响应就推进水位，避免同一批坏输出无限重试
-        await store.mark_raw_extracted([t["id"] for t in raw_turns])
-        await store.cap_raw(scope_type, scope_key, _RAW_CAP_PER_SCOPE)
-        await store.prune_semantic(scope_type, scope_key, _SEMANTIC_CAP_PER_SCOPE)
-        await store.mark_scope_consolidated(scope_type, scope_key)
+            await store.mark_raw_extracted(ids)
+            await store.cap_raw(scope_type, scope_key, _RAW_CAP_PER_SCOPE)
+            await store.prune_semantic(scope_type, scope_key, _SEMANTIC_CAP_PER_SCOPE)
+            await store.mark_scope_consolidated(scope_type, scope_key)
 
 
 async def _apply_semantic_ops(
@@ -300,6 +457,9 @@ async def _apply_semantic_ops(
     scope_key: str,
     parsed: dict,
     structured: list[dict],
+    *,
+    source_ref: str | None = None,
+    raw_turns: list[dict] | None = None,
 ) -> None:
     ops = parsed.get("semantic_ops")
     if not isinstance(ops, list):
@@ -329,7 +489,14 @@ async def _apply_semantic_ops(
             # key 可选：仅用于给无 key 的旧条目回填（存储层会校验占用冲突）
             memory_key = _clean_memory_text(op.get("key") or "", max_len=100) or None
             await store.update_memory_content(
-                target_id, content, importance, tags, memory_key
+                target_id,
+                content,
+                importance,
+                tags,
+                memory_key,
+                source_ref=json.dumps(op["source_turn_ids"])
+                if op.get("source_turn_ids")
+                else source_ref,
             )
         elif kind == "expire":
             try:
@@ -339,7 +506,9 @@ async def _apply_semantic_ops(
             if target_id not in structured_ids:
                 logger.debug(f"[Memoir] 忽略非法巩固 expire: target_id={target_id}")
                 continue
-            await store.delete_memory_in_scope(target_id, scope_type, scope_key)
+            await store.delete_memory_in_scope(
+                target_id, scope_type, scope_key, invalidate=False
+            )
         elif kind == "insert":
             content = _clean_memory_text(op.get("content") or "")
             if not content:
@@ -348,7 +517,17 @@ async def _apply_semantic_ops(
                 importance = max(1, min(5, int(op.get("importance") or 3)))
             except (TypeError, ValueError):
                 importance = 3
+            subject_id = (op.get("subject_id") or "") if scope_type == "group" else ""
             subject = _clean_memory_text(op.get("subject") or "", max_len=50) or None
+            if scope_type == "group" and raw_turns is not None:
+                subject = next(
+                    (
+                        t.get("speaker_name") or subject_id
+                        for t in raw_turns
+                        if t.get("speaker_id") == subject_id
+                    ),
+                    None,
+                )
             await store.insert_memory(
                 scope_type=scope_type,
                 scope_key=scope_key,
@@ -357,13 +536,22 @@ async def _apply_semantic_ops(
                 # 撞已有 key 时存储层自动转更新，硬性保证同事实不重复建条
                 memory_key=_clean_memory_text(op.get("key") or "", max_len=100) or None,
                 subject=subject,
+                subject_id=subject_id,
+                source_ref=json.dumps(op["source_turn_ids"])
+                if op.get("source_turn_ids")
+                else source_ref,
                 tags=_clean_memory_text(op.get("tags") or "", max_len=200),
                 importance=importance,
             )
 
 
 async def _apply_insight(
-    store: MemoryStore, scope_type: str, scope_key: str, parsed: dict
+    store: MemoryStore,
+    scope_type: str,
+    scope_key: str,
+    parsed: dict,
+    *,
+    source_ref: str | None = None,
 ) -> None:
     insight = parsed.get("insight")
     if not isinstance(insight, dict):
@@ -380,18 +568,29 @@ async def _apply_insight(
         scope_key=scope_key,
         memory_type="insight",
         content=content,
+        source_ref=source_ref,
         importance=importance,
     )
 
 
 async def _bridge_self_statements(
-    config: dict, store: MemoryStore, scope_key: str, parsed: dict, turn_map: dict
+    config: dict,
+    store: MemoryStore,
+    scope_key: str,
+    parsed: dict,
+    turn_map: dict,
+    *,
+    target_revisions: dict | None = None,
 ) -> None:
     """群聊自我陈述桥接：把已授权用户讲述自己的事实复制进其私聊原始轮次。
 
     以原文轮次形式进入对方私聊记忆管线，由其私聊巩固自然提炼，避免双写语义记忆。
     门控：全局桥接开关 AND 会话级桥接开关（scope_bridge_enabled）AND 用户授权 AND 敏感度。
     """
+    if not config.get("enable_private_memory", True) or not config.get(
+        "enable_group_memory", True
+    ):
+        return
     if not config.get("enable_cross_scope_bridge", False):
         return
     if not config.get("scope_bridge_enabled", True):
@@ -423,6 +622,15 @@ async def _bridge_self_statements(
         if not (consented and level_ok):
             continue
         target_key = private_scope_key(platform, turn["speaker_id"])
+        if target_revisions is not None and target_revisions.get(
+            target_key
+        ) != await store.get_revision("private", target_key):
+            continue
+        target_config = merge_scope_config(
+            config, await store.get_scope_config("private", target_key), "private"
+        )
+        if not target_config.get("scope_enabled", True):
+            continue
         await store.insert_raw_turn(
             scope_type="private",
             scope_key=target_key,
@@ -450,7 +658,9 @@ async def run_consolidation_pass(context, config: dict, store: MemoryStore) -> i
         eff = merge_scope_config(
             config, overrides.get((scope_type, scope_key)), scope_type
         )
-        if not eff.get("scope_enabled", True):
+        if not eff.get("scope_enabled", True) or not eff.get(
+            f"enable_{scope_type}_memory", True
+        ):
             continue
         threshold_key = (
             "consolidation_count_threshold_private"
@@ -492,6 +702,18 @@ async def run_forgetting_pass(config: dict, store: MemoryStore) -> int:
         decay_rate_semantic=float(config.get("decay_rate_semantic", 0.98)),
         decay_rate_insight=float(config.get("decay_rate_insight", 0.995)),
     )
+    async with store.transaction():
+        await store.connection.execute(
+            "DELETE FROM work_items WHERE status IN ('complete','failed') AND updated_at < ?",
+            (int(time.time()) - 30 * 86400,),
+        )
+        await store.connection.execute(
+            "DELETE FROM work_items WHERE kind='media' AND NOT EXISTS(SELECT 1 FROM raw_turns WHERE id=work_items.raw_id)"
+        )
+        await store.connection.execute(
+            "DELETE FROM consolidation_failures WHERE migrated=1 AND created_at < ?",
+            (int(time.time()) - 30 * 86400,),
+        )
     return pruned
 
 
@@ -504,6 +726,7 @@ class ConsolidationScheduler:
         self.store = store
         self._task: asyncio.Task | None = None
         self._stopping = False
+        self.wakeup = asyncio.Event()
 
     def start(self) -> None:
         if self._task is None:
@@ -527,7 +750,11 @@ class ConsolidationScheduler:
             )
             interval_seconds = max(60, interval_minutes * 60)
             try:
-                await asyncio.sleep(interval_seconds)
+                try:
+                    await asyncio.wait_for(self.wakeup.wait(), timeout=interval_seconds)
+                except asyncio.TimeoutError:
+                    pass
+                self.wakeup.clear()
                 if self._stopping:
                     break
                 processed = await run_consolidation_pass(

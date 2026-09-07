@@ -6,7 +6,7 @@ import { initTheme } from "./theme.js";
 import { renderOverview, renderSidebar, renderDetailHead } from "./sidebar.js";
 import { loadMemories } from "./memories.js";
 import { loadRaw } from "./raw.js";
-import { loadScopeConfigTab, saveScopeConfig, resetScopeConfig, saveGlobalConfig } from "./settings.js";
+import { loadScopeConfigTab, saveScopeConfig, resetScopeConfig, saveGlobalConfig, loadProcessingStatus } from "./settings.js";
 
 // Toast rejections raised by page modules only; content scripts from
 // browser extensions also bubble into this handler and stay console-only
@@ -28,6 +28,7 @@ async function loadTab() {
   $("search-wrap").style.display = state.tab === "memories" ? "flex" : "none";
   if (state.tab === "settings") $("pager").style.display = "none";
   if (!state.scope) {
+    state.loadVersion++;
     $("pager").style.display = "none";
     $("detail-head").innerHTML = "";
     $("content").innerHTML = renderNoScope();
@@ -66,8 +67,10 @@ async function clearScope() {
 }
 
 async function refreshAll(spin = false) {
+  const version = ++state.overviewVersion;
   $("refresh").classList.toggle("spinning", spin);
   const overview = await safe("刷新概览", () => bridge.apiGet("overview"), { silent: true });
+  if (version !== state.overviewVersion) return false;
   $("refresh").classList.remove("spinning");
   if (!overview) {
     toast("刷新失败：无法连接记忆服务", "err");
@@ -108,6 +111,7 @@ function bindEvents() {
     if (!item) return;
     const [scope_type, scope_key] = item.dataset.scope.split("|");
     state.scope = { scope_type, scope_key };
+    state.scopeOverride = {};
     state.page = 1;
     renderSidebar();
     loadTab();
@@ -135,6 +139,15 @@ function bindEvents() {
   });
 
   $("content").addEventListener("click", async (e) => {
+    const retryWork = e.target.closest("[data-retry-work]");
+    if (retryWork) {
+      retryWork.disabled = true;
+      const result = await safe("重试处理", () => bridge.apiPost("processing/retry", { id: Number(retryWork.dataset.retryWork), scope_type: retryWork.dataset.scopeType, scope_key: retryWork.dataset.scopeKey }));
+      if (result !== null) toast("已加入重试队列");
+      if (retryWork.isConnected) { retryWork.disabled = false; loadProcessingStatus(); }
+      return;
+    }
+    if (e.target.closest("#refresh-processing")) { loadProcessingStatus(); return; }
     if (e.target.closest("#save-scope-cfg")) { saveScopeConfig(); return; }
     if (e.target.closest("#reset-scope-cfg")) { resetScopeConfig(); return; }
     if (e.target.closest("#save-global-cfg")) { saveGlobalConfig(); return; }
@@ -183,6 +196,17 @@ function bindEvents() {
     if (ok !== null) toast(input.checked ? "已开启授权" : "已关闭授权");
     else input.checked = !input.checked;
   });
+
+  $("content").addEventListener("toggle", async (event) => {
+    const details = event.target;
+    if (!details.matches("[data-memory-source]") || !details.open || details.dataset.loaded) return;
+    const box = details.querySelector(".source-content");
+    details.dataset.loaded = "loading";
+    const result = await safe("查看来源", () => bridge.apiGet("memories/sources", { id: Number(details.dataset.memorySource), scope_type: details.dataset.scopeType, scope_key: details.dataset.scopeKey }));
+    if (!details.isConnected) return;
+    if (!result) { delete details.dataset.loaded; box.textContent = "来源加载失败，重新展开可重试"; return; }
+    box.innerHTML = result.items.map((item) => `<p><small>#${item.id} · ${esc(item.speaker_name || "对话")}</small><br>${esc(item.content)}</p>`).join("") + (result.expired ? `<p>${result.expired} 条来源已过期或删除</p>` : "") + (!result.tracked ? "历史记忆未记录来源" : "");
+  }, true);
 
   $("refresh").addEventListener("click", () => refreshAll(true));
 }

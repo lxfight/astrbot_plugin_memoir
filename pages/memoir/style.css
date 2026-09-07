@@ -297,6 +297,15 @@ html[data-theme="dark"] .st.c-raw .chip { background: rgba(148, 163, 184, 0.14);
 .list-pad { padding: 22px; display: flex; flex-direction: column; gap: 12px; width: 100%; max-width: 1120px; margin: 0 auto; }
 
 /* ============ memory cards ============ */
+.memory-sources { margin-top: 10px; font-size: 12px; color: var(--text-dim); }
+.memory-sources summary { cursor: pointer; color: var(--accent); }
+.source-content { overflow-wrap: anywhere; padding: 0 10px; border-left: 2px solid var(--border); }
+.processing-counts { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+.processing-failure { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--border); font-size: 12px; }
+.processing-failure > div { min-width: 0; overflow-wrap: anywhere; }
+.processing-failure p { margin: 4px 0; color: var(--danger); }
+.processing-failure .btn { flex-shrink: 0; }
+#refresh-processing { margin-left: auto; }
 .mem {
   position: relative; display: flex; align-items: stretch; gap: 12px;
   padding: 16px 18px 16px 20px; border-radius: var(--r);

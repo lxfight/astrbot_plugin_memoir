@@ -1,4 +1,4 @@
-import { $, RETRY_LOADERS, state } from "./state.js";
+import { $, beginLoad, RETRY_LOADERS, state } from "./state.js";
 import { esc, emptyState, errorPanel, fmtTime, dayLabel, refreshIcons, renderPager, skeleton, stagger } from "./utils.js";
 import { bridge, safe } from "./api.js";
 
@@ -35,9 +35,7 @@ function bubbleText(text) {
 function rawTurnHtml(r, prevDay, i) {
   const day = new Date((r.created_at || 0) * 1000).toDateString();
   const chip = day !== prevDay ? `<div class="day-chip"${stagger(i, 20)}>${esc(dayLabel(r.created_at || 0))}</div>` : "";
-  const pending = r.extracted
-    ? ""
-    : `<span class="pending-pill">待巩固</span>`;
+  const pending = r.extracted === -1 ? `<span class="pending-pill">巩固失败</span>` : r.extracted ? "" : `<span class="pending-pill">待巩固</span>`;
   const speaker = r.speaker_name
     ? `<span class="speaker" style="--speaker-hue:${speakerHue(r.speaker_name)}">${esc(r.speaker_name)}</span> ·`
     : "";
@@ -75,18 +73,19 @@ function renderRawTurns(items) {
 }
 
 export async function loadRaw() {
+  const request = beginLoad();
   $("content").innerHTML = skeleton();
   const res = await safe(
     "加载原文",
     () =>
       bridge.apiGet("raw", {
-        scope_type: state.scope.scope_type,
-        scope_key: state.scope.scope_key,
+        ...request.scope,
         page: state.page,
         page_size: state.pageSize,
       }),
     { silent: true },
   );
+  if (!request.current()) return;
   if (!res) {
     $("content").innerHTML = errorPanel("加载原文对话", "请求失败，请检查后端状态后重试", "raw");
     refreshIcons();

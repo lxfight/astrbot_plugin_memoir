@@ -29,6 +29,8 @@ GLOBAL_CONFIG_KEYS = (
     "enable_group_memory",
     "background_llm_provider",
     "recall_top_k",
+    "recall_max_chars",
+    "consolidation_related_top_k",
     "recall_core_top_k",
     "recall_recent_turns",
     "consolidation_scan_interval_minutes",
@@ -48,6 +50,8 @@ GLOBAL_DEFAULTS = {
     "enable_group_memory": True,
     "background_llm_provider": "",
     "recall_top_k": 5,
+    "recall_max_chars": 6000,
+    "consolidation_related_top_k": 20,
     "recall_core_top_k": 3,
     "recall_recent_turns": 5,
     "consolidation_scan_interval_minutes": 30,
@@ -68,6 +72,7 @@ GLOBAL_SELECTS = {"bridge_max_sensitivity": ("low", "medium", "high")}
 SCOPE_CONFIG_KEYS = (
     "enabled",
     "recall_top_k",
+    "recall_max_chars",
     "recall_core_top_k",
     "recall_recent_turns",
     "consolidation_count_threshold",
@@ -79,6 +84,8 @@ SCOPE_SELECTS = {"bridge_max_sensitivity": ("low", "medium", "high")}
 
 _INT_KEYS = {
     "recall_top_k",
+    "recall_max_chars",
+    "consolidation_related_top_k",
     "recall_core_top_k",
     "recall_recent_turns",
     "consolidation_scan_interval_minutes",
@@ -118,6 +125,10 @@ def _validate_config_payload(
         elif key in _INT_KEYS:
             try:
                 cleaned[key] = max(0, int(value))
+                if key == "recall_max_chars":
+                    cleaned[key] = min(20000, max(512, cleaned[key]))
+                elif key.startswith("recall_") or key == "consolidation_related_top_k":
+                    cleaned[key] = min(100, cleaned[key])
             except (TypeError, ValueError):
                 return None
         elif key in _FLOAT_KEYS:
@@ -152,6 +163,58 @@ class WebApi:
         if plugin is None or plugin._terminating or not plugin._initialized:
             return None
         return plugin.store, plugin.config
+
+    async def processing_status(self):
+        """Return scoped queue counts, backlog age and retryable failures."""
+        ctx, scope = self._ctx(), self._require_scope()
+        if ctx is None or scope is None:
+            return error_response("plugin or scope unavailable")
+        return json_response(await ctx[0].get_processing_status(*scope))
+
+    async def retry_processing(self):
+        """Requeue a failed job while respecting current memory switches."""
+        ctx = self._ctx()
+        if ctx is None:
+            return error_response("plugin unavailable")
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("invalid payload")
+        scope = self._scope_from_payload(payload)
+        try:
+            work_id = int(payload.get("id"))
+        except (TypeError, ValueError):
+            return error_response("invalid work id")
+        if scope is None:
+            return error_response("scope required")
+        store, config = ctx
+        async with store.transaction():
+            override = await store.get_scope_config(*scope)
+            if (
+                not config.get(f"enable_{scope[0]}_memory", True)
+                or override.get("enabled") is False
+            ):
+                return error_response("memory is disabled for this conversation")
+            if not await store.retry_work(work_id, *scope):
+                return error_response(
+                    "source expired, queue full, or task is not retryable"
+                )
+        plugin = self._plugin_ref()
+        plugin.event_handler.media.wakeup.set()
+        plugin.event_handler.scheduler.wakeup.set()
+        return json_response({"queued": work_id})
+
+    async def memory_sources(self):
+        """Return source text only within the selected memory's scope."""
+        ctx, scope = self._ctx(), self._require_scope()
+        if ctx is None or scope is None:
+            return error_response("plugin or scope unavailable")
+        memory_id = request.query.get("id", 0, type=int)
+        result = await ctx[0].get_memory_sources(memory_id, *scope)
+        return (
+            json_response(result)
+            if result is not None
+            else error_response("memory not found")
+        )
 
     async def overview(self):
         ctx = self._ctx()
@@ -326,8 +389,12 @@ class WebApi:
         try:
             pm = getattr(plugin.context, "provider_manager", None)
             if pm is not None:
+                from astrbot.core.provider.provider import Provider
+
                 providers = sorted(
-                    str(pid) for pid in getattr(pm, "inst_map", {}).keys()
+                    str(pid)
+                    for pid, provider in getattr(pm, "inst_map", {}).items()
+                    if isinstance(provider, Provider)
                 )
         except Exception:
             providers = []
@@ -345,17 +412,26 @@ class WebApi:
         ctx = self._ctx()
         if ctx is None:
             return error_response("plugin is not available")
-        _, config = ctx
+        store, config = ctx
         payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("invalid config payload")
         updates = _validate_config_payload(payload, GLOBAL_CONFIG_KEYS, GLOBAL_SELECTS)
         if updates is None:
             return error_response("invalid config payload")
         if updates:
-            for key, value in updates.items():
-                config[key] = value
-            save_config = getattr(config, "save_config", None)
-            if callable(save_config):
-                save_config()
+            async with store.transaction():
+                previous = dict(config)
+                try:
+                    config.update(updates)
+                    save_config = getattr(config, "save_config", None)
+                    if callable(save_config):
+                        save_config()
+                except Exception:
+                    config.clear()
+                    config.update(previous)
+                    raise
+                store.config_revision += 1
         return json_response({"updated": sorted(updates)})
 
     async def get_scope_config(self):
@@ -395,7 +471,7 @@ class WebApi:
     def _require_scope() -> tuple[str, str] | None:
         scope_type = request.query.get("scope_type") or ""
         scope_key = request.query.get("scope_key") or ""
-        if not scope_type or not scope_key:
+        if scope_type not in {"private", "group"} or not scope_key:
             return None
         return scope_type, scope_key
 
@@ -403,6 +479,6 @@ class WebApi:
     def _scope_from_payload(payload: dict) -> tuple[str, str] | None:
         scope_type = str(payload.get("scope_type") or "").strip()
         scope_key = str(payload.get("scope_key") or "").strip()
-        if not scope_type or not scope_key:
+        if scope_type not in {"private", "group"} or not scope_key:
             return None
         return scope_type, scope_key

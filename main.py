@@ -65,6 +65,21 @@ class MemoirPlugin(Star):
             f"{prefix}/overview", api.overview, ["GET"], "Memory overview"
         )
         self.context.register_web_api(
+            f"{prefix}/processing", api.processing_status, ["GET"], "Processing status"
+        )
+        self.context.register_web_api(
+            f"{prefix}/processing/retry",
+            api.retry_processing,
+            ["POST"],
+            "Retry failed processing",
+        )
+        self.context.register_web_api(
+            f"{prefix}/memories/sources",
+            api.memory_sources,
+            ["GET"],
+            "Memory source turns",
+        )
+        self.context.register_web_api(
             f"{prefix}/memories", api.memories, ["GET"], "List/search memories"
         )
         self.context.register_web_api(
@@ -186,17 +201,30 @@ class MemoirPlugin(Star):
         if not self._initialized or self._terminating:
             return
         try:
-            self._track_task(asyncio.create_task(self._dispatch_group_capture(event)))
+            scope = resolve_scope(event)
+            generation = self.store.generations.get(
+                (scope.scope_type, scope.scope_key), 0
+            )
+            self._track_task(
+                asyncio.create_task(self._dispatch_group_capture(event, generation))
+            )
         except RuntimeError:
             # 无运行中的事件循环（极端情况），忽略本次捕获
             pass
 
-    async def _dispatch_group_capture(self, event: AstrMessageEvent) -> None:
-        """由 PassiveGroupCaptureFilter 触发的捕获分发（内部任务调用入口）。"""
+    async def _dispatch_group_capture(
+        self, event: AstrMessageEvent, generation: int = 0
+    ) -> None:
+        """Dispatch capture queued by the passive group filter.
+
+        Args:
+            event: Incoming group message event.
+            generation: Scope generation when capture was queued.
+        """
         if not self._initialized or self.event_handler is None:
             return
         try:
-            await self.event_handler.on_group_message(event)
+            await self.event_handler.on_group_message(event, generation=generation)
         except Exception as exc:
             logger.warning(f"[Memoir] 群消息捕获失败（不影响主流程）: {exc}")
 

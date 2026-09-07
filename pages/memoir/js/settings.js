@@ -1,4 +1,4 @@
-import { $, RETRY_LOADERS, state } from "./state.js";
+import { $, beginLoad, RETRY_LOADERS, state } from "./state.js";
 import { esc, errorPanel, refreshIcons, skeleton, stagger, timeAgo, toast } from "./utils.js";
 import { bridge, safe } from "./api.js";
 import { renderDetailHead } from "./sidebar.js";
@@ -16,6 +16,7 @@ const GLOBAL_FIELDS = [
   {
     section: "召回",
     items: [
+      { key: "recall_max_chars", label: "召回总字符预算", type: "number", min: 512, max: 20000, hint: "三层记忆共用预算，默认 6000 字符" },
       { key: "recall_top_k", label: "线索召回条数", type: "number", min: 1, max: 30 },
       { key: "recall_core_top_k", label: "常驻记忆条数", type: "number", min: 0, max: 10, hint: "每次对话固定注入的稳定认知，0 关闭" },
       { key: "recall_recent_turns", label: "群聊近因条数", type: "number", min: 0, max: 20, hint: "群聊召回时附带最近原文，0 关闭" },
@@ -28,7 +29,7 @@ const GLOBAL_FIELDS = [
       { key: "consolidation_count_threshold_private", label: "私聊触发阈值（轮）", type: "number", min: 1, max: 500 },
       { key: "consolidation_count_threshold_group", label: "群聊触发阈值（条）", type: "number", min: 1, max: 1000 },
       { key: "consolidation_idle_hours", label: "静默触发（小时）", type: "number", min: 1, max: 168 },
-      { key: "raw_retention_days", label: "原文保留天数", type: "number", min: 1, max: 365 },
+      { key: "raw_retention_days", label: "原文保留天数", type: "number", min: 0, max: 365, hint: "0 不按时间清理，仍受容量限制" },
       { key: "decay_rate_semantic", label: "语义衰减系数", type: "float", hint: "每自然日强度保留比例 0-1，按距上次激活的实际天数折算" },
       { key: "decay_rate_insight", label: "洞察衰减系数", type: "float", hint: "洞察几乎不遗忘，接近 1" },
     ],
@@ -43,6 +44,7 @@ const GLOBAL_FIELDS = [
 ];
 
 const SCOPE_FIELDS = [
+  { key: "recall_max_chars", label: "召回总字符预算", type: "inherit-number" },
   { key: "enabled", label: "启用本会话记忆", type: "inherit-switch", hint: "关闭后该会话不再捕获与召回" },
   { key: "recall_top_k", label: "线索召回条数", type: "inherit-number" },
   { key: "recall_core_top_k", label: "常驻记忆条数", type: "inherit-number" },
@@ -90,19 +92,20 @@ function fieldRow(f, value, inheritValue, inheritable) {
 }
 
 export async function loadScopeConfigTab() {
+  const request = beginLoad();
   $("content").innerHTML = skeleton(3);
   const [cfgRes, gRes] = await Promise.all([
     safe(
       "加载会话配置",
       () =>
         bridge.apiGet("scope-config", {
-          scope_type: state.scope.scope_type,
-          scope_key: state.scope.scope_key,
+          ...request.scope,
         }),
       { silent: true },
     ),
     safe("加载全局配置", () => bridge.apiGet("config"), { silent: true }),
   ]);
+  if (!request.current()) return;
   if (!cfgRes || !gRes) {
     $("content").innerHTML = errorPanel("加载配置", "请求失败，请检查后端状态后重试", "settings");
     refreshIcons();
@@ -123,7 +126,8 @@ export async function loadScopeConfigTab() {
     return `<div class="form-section-sub"${stagger(si, 0)}>${esc(gsec.section)}</div>${gRows}`;
   }).join("");
   $("content").innerHTML = `
-    <div class="form-card" id="scope-config-form"${stagger(0)}>
+    <div class="form-card" id="processing-status">正在加载处理状态…</div>
+    <div class="form-card" id="scope-config-form" data-scope-type="${esc(request.scope.scope_type)}" data-scope-key="${esc(request.scope.scope_key)}"${stagger(0)}>
       <div class="form-title"><i data-lucide="sliders-horizontal"></i>会话覆盖配置</div>
       <p class="form-sub">仅对此会话生效；留空/「跟随全局」表示使用下方全局默认值</p>
       ${rows}
@@ -147,6 +151,7 @@ export async function loadScopeConfigTab() {
     </div>`;
   refreshIcons();
   loadConsents();
+  loadProcessingStatus();
 }
 
 function collectScopeOverride() {
@@ -166,21 +171,27 @@ function collectScopeOverride() {
 }
 
 export async function saveScopeConfig() {
+  const form = $("scope-config-form");
+  if (!form) return;
+  const scope = { scope_type: form.dataset.scopeType, scope_key: form.dataset.scopeKey };
+  const version = state.loadVersion;
   const override = collectScopeOverride();
   const res = await safe("保存会话配置", () =>
-    bridge.apiPost("scope-config/update", { ...state.scope, override }),
+    bridge.apiPost("scope-config/update", { ...scope, override }),
   );
-  if (res === null) return;
+  if (res === null || version !== state.loadVersion) return;
   state.scopeOverride = override;
   toast(override && Object.keys(override).length ? "会话配置已保存" : "已恢复继承全局");
   renderDetailHead();
 }
 
 export async function resetScopeConfig() {
+  const scope = { ...state.scope };
+  const version = state.loadVersion;
   const res = await safe("恢复配置", () =>
-    bridge.apiPost("scope-config/update", { ...state.scope, override: {} }),
+    bridge.apiPost("scope-config/update", { ...scope, override: {} }),
   );
-  if (res === null) return;
+  if (res === null || version !== state.loadVersion) return;
   state.scopeOverride = {};
   toast("已恢复继承全局配置");
   renderDetailHead();
@@ -212,6 +223,7 @@ export async function loadConsents() {
   const box = $("consent-box");
   if (!box) return;
   const res = await safe("加载授权记录", () => bridge.apiGet("consents"), { silent: true });
+  if (!box.isConnected) return;
   if (!res) {
     box.innerHTML = errorPanel("加载授权记录", "请求失败", "consents");
     refreshIcons();
@@ -236,3 +248,26 @@ export async function loadConsents() {
   refreshIcons();
 }
 RETRY_LOADERS.consents = () => loadConsents();
+
+export async function loadProcessingStatus() {
+  const box = $("processing-status");
+  if (!box || !state.scope) return;
+  const scope = { ...state.scope };
+  const version = state.loadVersion;
+  const requestId = (Number(box.dataset.request) || 0) + 1;
+  box.dataset.request = String(requestId);
+  const result = await safe("加载处理状态", () => bridge.apiGet("processing", scope), { silent: true });
+  if (!box.isConnected || version !== state.loadVersion || Number(box.dataset.request) !== requestId) return;
+  if (!result) {
+    box.innerHTML = errorPanel("处理状态", "暂时无法读取，请重试", "processing");
+    refreshIcons();
+    return;
+  }
+  const names = { pending: "排队", running: "处理中", failed: "失败", complete: "完成" };
+  box.innerHTML = `<div class="form-title"><i data-lucide="activity"></i>处理状态<button class="btn" id="refresh-processing">刷新状态</button></div>
+    <p class="form-sub">最早积压：${Math.floor(result.oldest_pending_seconds / 60)} 分钟 · 媒体队列最多 32 条，同时处理 2 条</p>
+    <div class="processing-counts">${result.counts.map((c) => `<span class="subject-chip">${c.kind === "media" ? "媒体" : "巩固"} ${esc(names[c.status] || c.status)} ${c.count}</span>`).join("") || "暂无后台任务"}</div>
+    ${result.failures.map((f) => `<div class="processing-failure"><div><strong>${f.kind === "media" ? "媒体解析" : "记忆巩固"} #${f.id}</strong><p>${esc(f.error)}</p><small>尝试 ${f.attempts} 次 · ${timeAgo(f.updated_at)}</small></div><button class="btn" data-retry-work="${f.id}" data-scope-type="${esc(scope.scope_type)}" data-scope-key="${esc(scope.scope_key)}" ${f.retryable ? "" : "disabled"}>${f.retryable ? "重试" : "来源已过期"}</button></div>`).join("")}`;
+  refreshIcons();
+}
+RETRY_LOADERS.processing = loadProcessingStatus;

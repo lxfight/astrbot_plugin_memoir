@@ -2,7 +2,7 @@
 Capture conversation text and descriptions of supported incoming media.
 
 Text capture does not call an LLM. Supported images and audio are described
-before storage; decisions about lasting memories remain in consolidation.
+by a bounded background queue; decisions about lasting memories remain in consolidation.
 
 - 私聊：on_llm_response 后把「用户 + 助手」完整一轮落库。
 - 群聊：被动捕获每条消息落库（此前为控制 LLM 成本的两级门控已无存在必要）；
@@ -16,7 +16,6 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import File, Image, Record, Video
 from astrbot.api.provider import LLMResponse
 
-from .llm_helper import describe_multimedia
 from .scope import merge_scope_config, resolve_scope
 from .storage import MemoryStore
 
@@ -52,6 +51,8 @@ async def handle_private_response(
     store: MemoryStore,
     event: AstrMessageEvent,
     resp: LLMResponse,
+    *,
+    processor=None,
 ) -> None:
     """私聊场景：LLM 响应后把完整一轮对话落库（全局开关 + 会话覆盖叠加判断）"""
     if not config.get("enable_private_memory", True):
@@ -65,18 +66,18 @@ async def handle_private_response(
     if not config.get("scope_enabled", True):
         return
     user_text = _capture_text(event)
-    description = await describe_multimedia(context, config, event)
-    if description:
-        user_text = f"{user_text[:1000]} [多媒体解析] {description}"
     assistant_text = (resp.completion_text or "").strip()
     if not user_text and not assistant_text:
         return
     content = f"用户: {user_text} / 助手: {assistant_text}"
-    await store.insert_raw_turn(
+    raw_id = await store.insert_raw_turn(
         scope_type=scope.scope_type,
         scope_key=scope.scope_key,
         content=content[:_MAX_CONTENT_LENGTH],
+        umo=event.unified_msg_origin,
     )
+    if processor:
+        await processor.enqueue(event, scope, raw_id, user_text, assistant_text)
 
 
 async def handle_group_response(
@@ -115,11 +116,17 @@ async def handle_group_response(
         scope_type=scope.scope_type,
         scope_key=scope.scope_key,
         content=f"助手: {assistant_text}"[:_MAX_CONTENT_LENGTH],
+        umo=event.unified_msg_origin,
     )
 
 
 async def handle_group_message(
-    context, config: dict, store: MemoryStore, event: AstrMessageEvent
+    context,
+    config: dict,
+    store: MemoryStore,
+    event: AstrMessageEvent,
+    *,
+    processor=None,
 ) -> None:
     """群聊场景：被动捕获的消息原文落库（指令、忽略名单用户与关键词命中的消息除外）"""
     if not config.get("enable_group_memory", True):
@@ -153,16 +160,13 @@ async def handle_group_message(
     ]
     if any(k in text for k in ignored_keywords):
         return
-    description = await describe_multimedia(context, config, event)
-    if description:
-        # Apply the same privacy filter to recognized speech and image text.
-        if any(k in description for k in ignored_keywords):
-            return
-        text = f"{text[:1000]} [多媒体解析] {description}"
-    await store.insert_raw_turn(
+    raw_id = await store.insert_raw_turn(
         scope_type=scope.scope_type,
         scope_key=scope.scope_key,
         content=text[:_MAX_CONTENT_LENGTH],
         speaker_id=scope.subject,
         speaker_name=event.get_sender_name() or None,
+        umo=event.unified_msg_origin,
     )
+    if processor:
+        await processor.enqueue(event, scope, raw_id, text)

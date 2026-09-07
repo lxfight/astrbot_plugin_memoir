@@ -60,6 +60,8 @@ beforeEach(async () => {
         if (endpoint === "raw") return { total: 1, items: [{ id: 1, content: "用户: 今天带小福去了公园 [图片] [多媒体解析] 图片1：柴犬坐在树荫下的草地上。 / 助手: 看起来小福玩得很开心！", created_at: now, extracted: false }] };
         if (endpoint === "scope-config") return { override: { recall_top_k: 2 } };
         if (endpoint === "config") return { config: { recall_top_k: 9, background_llm_provider: "vision-model", enable_private_memory: true }, providers: ["vision-model", "audio-model"] };
+        if (endpoint === "processing") return { counts: [{ kind: "media", status: "failed", count: 1 }], oldest_pending_seconds: 7200, failures: [{ id: 7, kind: "media", error: "Model timed out", attempts: 1, updated_at: now, retryable: true }] };
+        if (endpoint === "memories/sources") return { items: [{ id: 3, content: "Original <script>unsafe()</script> text", speaker_name: "小张" }], tracked: true, expired: 1 };
         if (endpoint === "consents") return { items: [] };
         throw new Error(`Unexpected endpoint: ${endpoint}`);
       },
@@ -147,4 +149,52 @@ test("light, dark and narrow layouts render without horizontal overflow", async 
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${tab} overflows`);
   }
   if (output) await page.screenshot({ path: path.join(output, "mobile.png"), fullPage: true });
+});
+
+test("late scope responses cannot replace a newer form or change its save target", async () => {
+  await page.evaluate(() => {
+    const original = window.AstrBotPluginPage.apiGet;
+    window.AstrBotPluginPage.apiGet = async (endpoint, params) => {
+      if (endpoint === "scope-config" && params.scope_key === "test:小张") {
+        return new Promise((resolve) => { window.releaseOldScope = () => resolve({ override: { recall_top_k: 2 } }); });
+      }
+      if (endpoint === "scope-config") return { override: { recall_top_k: 9 } };
+      return original(endpoint, params);
+    };
+  });
+  await page.locator('[data-tab="settings"]').click();
+  await page.waitForFunction(() => typeof window.releaseOldScope === "function");
+  await page.locator('[data-scope="group|test:周末摄影小组"]').click();
+  await page.waitForFunction(() => document.getElementById("scope-recall_top_k")?.value === "9");
+  await page.evaluate(async () => { window.releaseOldScope(); await new Promise(requestAnimationFrame); });
+  assert.equal(await page.locator("#scope-recall_top_k").inputValue(), "9");
+  await page.locator("#save-scope-cfg").click();
+  const saved = await page.evaluate(() => window.savedRequests.at(-1));
+  assert.equal(saved.payload.scope_key, "test:周末摄影小组");
+  assert.equal(saved.payload.override.recall_top_k, 9);
+});
+
+test("source text is escaped and retries remain bound to the displayed scope", async () => {
+  await page.locator(".memory-sources summary").first().click();
+  await page.locator(".source-content").first().getByText("Original <script>unsafe()</script> text", { exact: false }).waitFor();
+  assert.equal(await page.locator(".source-content script").count(), 0);
+  await page.locator('[data-tab="settings"]').click();
+  await page.locator('[data-retry-work="7"]').click();
+  const saved = await page.evaluate(() => window.savedRequests.at(-1));
+  assert.deepEqual(saved, { endpoint: "processing/retry", payload: { id: 7, scope_type: "private", scope_key: "test:小张" } });
+});
+
+test("late memory results cannot overwrite another tab", async () => {
+  await page.evaluate(() => {
+    const original = window.AstrBotPluginPage.apiGet;
+    window.AstrBotPluginPage.apiGet = (endpoint, params) => endpoint === "memories"
+      ? new Promise((resolve) => { window.releaseMemories = () => resolve({ items: [], total: 0 }); })
+      : original(endpoint, params);
+  });
+  await page.locator('[data-tab="memories"]').click();
+  await page.waitForFunction(() => typeof window.releaseMemories === "function");
+  await page.locator('[data-tab="raw"]').click();
+  await page.locator(".bubble").first().waitFor();
+  await page.evaluate(async () => { window.releaseMemories(); await new Promise(requestAnimationFrame); });
+  assert.equal(await page.locator(".bubble").count(), 2);
 });

@@ -271,11 +271,9 @@ async def handle_recall(
             terms,
             int(config.get("recall_top_k", 5)),
             # 群聊整群共享记忆池：关于当前发言人的记忆更可能被需要
-            boost_subject=event.get_sender_name() if scope_type == "group" else None,
+            boost_subject=event.get_sender_id() if scope_type == "group" else None,
             phrase=phrase,
         )
-        if cued:
-            await store.reinforce_memories([m["id"] for m in cued])
         # 私聊：req.contexts 即模型当前可见的会话历史（OpenAI 格式 dict 列表），
         # 其中的轮次不再重复召回，线索层只检索更早的原文——否则上下文线索
         # 扩展取自最近原文，必然命中这些原文本身，注入等于浪费 token；
@@ -325,5 +323,28 @@ async def handle_recall(
     if not memories:
         return
 
-    memory_block = _format_memory_block(memories)
+    budget = min(20000, max(512, int(config.get("recall_max_chars", 6000))))
+    selected = []
+    for memory in memories:
+        candidate = dict(memory)
+        block = _format_memory_block(selected + [candidate])
+        overflow = len(block) - budget
+        if overflow > 0:
+            remaining = len(candidate["content"]) - overflow - 1
+            if remaining < 40:
+                continue
+            candidate["content"] = candidate["content"][:remaining] + "…"
+        selected.append(candidate)
+    if not selected:
+        return
+    await store.reinforce_memories(
+        [
+            m["id"]
+            for m in selected
+            if m["id"] in cued_ids
+            and m.get("memory_type") != "raw"
+            and "memory_type" in m
+        ]
+    )
+    memory_block = _format_memory_block(selected)
     req.extra_user_content_parts.append(TextPart(text=memory_block).mark_as_temp())
