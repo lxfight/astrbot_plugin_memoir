@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+暂无未发布更新。
+
+## [0.4.1] — 2026-09-08
+
 ### 文档与提示
 
 - 在安装说明和配置界面明确提示群聊记忆默认开启、无需触发回复也可能记录消息，以及原文和媒体的模型处理方式。
@@ -73,6 +77,7 @@
 - 收窄模型巩固指令与原文数据混合造成的提示注入影响面。
 - 拆分 WebUI 样式与 ES 模块，增加完整记忆流程回归测试。
 
-[Unreleased]: https://github.com/lxfight/astrbot_plugin_memoir/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/lxfight/astrbot_plugin_memoir/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.4.1
 [0.4.0]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.4.0
 [0.3.0.dev0]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.3.0.dev0
