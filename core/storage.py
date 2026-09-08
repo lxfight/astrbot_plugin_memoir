@@ -246,6 +246,10 @@ class MemoryStore:
                 )
         await self.connection.executescript("""
             CREATE INDEX IF NOT EXISTS idx_raw_parent ON raw_turns(parent_id);
+            CREATE INDEX IF NOT EXISTS idx_raw_history
+                ON raw_turns(scope_type, scope_key, created_at DESC, id DESC)
+                WHERE parent_id IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_work_raw_latest ON work_items(raw_id, id DESC);
             CREATE TRIGGER IF NOT EXISTS raw_forward_cleanup AFTER DELETE ON raw_turns
             BEGIN
                 DELETE FROM work_items WHERE raw_id=OLD.id OR raw_id=OLD.parent_id;
@@ -332,7 +336,16 @@ class MemoryStore:
 
     @serialized
     async def browse_records(
-        self, scope_type, scope_key, kind, filters, page=1, page_size=20
+        self,
+        scope_type,
+        scope_key,
+        kind,
+        filters,
+        page=1,
+        page_size=20,
+        *,
+        cursor_mode=False,
+        before=None,
     ):
         """Browse scoped records with exact counts and event-level raw pagination.
 
@@ -343,12 +356,16 @@ class MemoryStore:
             filters: Validated search and filter values.
             page: One-based requested page, clamped after deletion.
             page_size: Bounded page size.
+            cursor_mode: Use keyset pagination without counts for raw history.
+            before: Exclusive (created_at, id) boundary for older events.
 
         Returns:
             Items, total matches, and the effective page.
         """
         if kind not in {"memories", "raw"}:
             raise ValueError("Invalid record kind")
+        if cursor_mode and kind != "raw":
+            raise ValueError("Cursor pagination is only available for raw history")
         conditions = ["r.scope_type=?", "r.scope_key=?"]
         params = [scope_type, scope_key]
         query = str(filters.get("q") or "").strip()[:200]
@@ -356,6 +373,9 @@ class MemoryStore:
         source = filters.get("source")
         if kind == "raw":
             conditions.append("r.parent_id IS NULL")
+            if cursor_mode and before is not None:
+                conditions.append("(r.created_at, r.id) < (?, ?)")
+                params.extend(before)
             select = """r.*, (SELECT COUNT(*) FROM raw_turns c WHERE c.parent_id=r.id) AS chunk_count,
                 COALESCE((SELECT CASE WHEN w.status='failed' THEN CASE WHEN json_extract(r.source_meta,'$.status') IN ('partial','unsupported') THEN json_extract(r.source_meta,'$.status') ELSE 'failed' END ELSE w.status END
                     FROM work_items w WHERE w.raw_id=r.id ORDER BY w.id DESC LIMIT 1),
@@ -405,13 +425,29 @@ class MemoryStore:
                 params.append(filters["importance"])
             if filters.get("sort") == "importance":
                 ordering = "importance DESC,updated_at DESC,id DESC"
-        sql = f"SELECT {select} FROM {table} r WHERE {' AND '.join(conditions)}"
+        # History must seek the compound cursor rather than scan all root parents.
+        index_hint = "INDEXED BY idx_raw_history" if cursor_mode else ""
+        sql = f"SELECT {select} FROM {table} r {index_hint} WHERE {' AND '.join(conditions)}"
         if kind == "raw" and filters.get("status"):
             sql = f"SELECT * FROM ({sql}) WHERE processing_status=?"
             params.append(filters["status"])
+        page_size = min(100, max(1, page_size))
+        if cursor_mode:
+            cursor = await self.connection.execute(
+                f"{sql} ORDER BY {ordering} LIMIT ?", (*params, page_size + 1)
+            )
+            rows = [dict(row) for row in await cursor.fetchall()]
+            has_more = len(rows) > page_size
+            items = rows[:page_size]
+            return {
+                "items": items,
+                "has_more": has_more,
+                "next_cursor": f"{items[-1]['created_at']}:{items[-1]['id']}"
+                if has_more
+                else None,
+            }
         cursor = await self.connection.execute(f"SELECT COUNT(*) FROM ({sql})", params)
         total = (await cursor.fetchone())[0]
-        page_size = min(100, max(1, page_size))
         page = max(1, min(page, (total + page_size - 1) // page_size))
         cursor = await self.connection.execute(
             f"{sql} ORDER BY {ordering} LIMIT ? OFFSET ?",

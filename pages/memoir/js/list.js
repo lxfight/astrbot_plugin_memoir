@@ -20,7 +20,9 @@ export function renderFilters() {
 }
 export function renderSelection() {
   $("selection-bar").hidden = !state.selecting;
-  $("selection-bar").innerHTML = `<label><input type="checkbox" id="select-page" ${state.items.length && state.selected.size === state.items.length ? "checked" : ""}>选择当前页</label><span>已选 ${state.selected.size} 条，仅限当前页</span><button class="btn danger" id="delete-selection" ${state.selected.size ? "" : "disabled"}>删除所选</button>`;
+  const raw = state.tab === "raw";
+  const candidates = raw ? state.items.slice(-100) : state.items;
+  $("selection-bar").innerHTML = `<label><input type="checkbox" id="select-page" ${candidates.length && candidates.every(row => state.selected.has(row.id)) ? "checked" : ""}>${raw ? "选择已加载记录（最近最多 100 条）" : "选择当前页"}</label><span>已选 ${state.selected.size} 条，${raw ? "仅限已加载记录" : "仅限当前页"}</span><button class="btn danger" id="delete-selection" ${state.selected.size ? "" : "disabled"}>删除所选</button>`;
 }
 
 export async function loadRecords(render) {

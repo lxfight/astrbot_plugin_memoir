@@ -204,7 +204,74 @@ test("late memory results cannot overwrite another tab", async () => {
   await page.locator('[data-tab="raw"]').click();
   await page.locator(".bubble").first().waitFor();
   await page.evaluate(async () => { window.releaseMemories(); await new Promise(requestAnimationFrame); });
-  assert.equal(await page.locator(".bubble").count(), 1);
+  assert.equal(await page.locator(".raw-event").count(), 1);
+  assert.equal(await page.locator(".bubble").count(), 2);
+});
+
+test("raw conversations keep role bubbles, quoted identity and event actions across layouts", async () => {
+  await page.evaluate(() => {
+    const original = window.AstrBotPluginPage.apiGet;
+    const now = Math.floor(Date.now() / 1000);
+    window.AstrBotPluginPage.apiGet = async (endpoint, params) => {
+      if (endpoint === "raw") return { total: 3, items: [
+        { id: 1, source_kind: "native", content: "用户: 今天带小福去了公园 [图片] / 助手: 小福看起来玩得很开心！树荫下的光线也很适合拍照。", created_at: now, processing_status: "unextracted" },
+        { id: 2, source_kind: "native", speaker_name: "小林", speaker_id: "photographer-02", content: "周末的摄影活动定在植物园吧，我带反光板，大家可以练习自然光人像。", created_at: now - 600, processing_status: "complete" },
+        { id: 3, source_kind: "forward_root", speaker_name: "小张", speaker_id: "42", chunk_count: 8, content: "用户: 引用内容 / 助手: 引用回复", created_at: now - 1200, processing_status: "partial" },
+      ] };
+      return original(endpoint, params);
+    };
+  });
+  await page.locator('[data-tab="raw"]').click();
+  await page.locator('.forward-preview').waitFor();
+  assert.equal(await page.locator('.msg.me .record-text').textContent(), '今天带小福去了公园 [图片]');
+  assert.match(await page.locator('.msg.bot .record-text').textContent(), /小福看起来/);
+  assert.equal(await page.locator('.raw-event:not(.forward-event) .msg.other .msg-head').textContent(), '小林');
+  assert.equal(await page.locator('.forward-event .msg.me, .forward-event .msg.bot').count(), 0);
+  assert.match(await page.locator('.forward-note').textContent(), /未经验证/);
+  assert.equal(await page.locator('[data-del-raw]').count(), 3);
+  const menu = page.locator('.message-menu').first();
+  await menu.locator('summary').click();
+  assert.equal(await menu.locator('[data-del-raw]').isVisible(), true);
+  await page.keyboard.press('Escape');
+  assert.equal(await menu.evaluate(el => el.open), false);
+  await menu.locator('summary').click();
+  await page.locator('.day-chip').click();
+  assert.equal(await menu.evaluate(el => el.open), false);
+  const output = process.env.MEMOIR_SCREENSHOT_DIR;
+  for (const theme of ['浅色', '深色']) {
+    await page.getByRole('radio', { name: theme, exact: true }).check();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    if (output) await page.screenshot({ path: path.join(output, `raw-${theme === '浅色' ? 'light' : 'dark'}.png`) });
+  }
+  await page.setViewportSize({ width: 375, height: 812 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  if (output) await page.screenshot({ path: path.join(output, 'raw-mobile.png'), fullPage: true });
+  await page.locator('#toggle-selection').click();
+  await page.locator('[data-select="1"]').check();
+  assert.match(await page.locator('#selection-bar').textContent(), /已选 1 条/);
+  await page.locator('.message-menu').filter({ has: page.locator('[data-del-raw="1"]') }).locator('summary').click();
+  const menuBox = await page.locator('.message-menu[open] .message-menu-panel').boundingBox();
+  assert.ok(menuBox.x >= 0 && menuBox.x + menuBox.width <= 375);
+  await page.locator('[data-del-raw="1"]').click();
+  assert.equal(await page.locator('#confirm-dialog').evaluate(el => el.open), true);
+  await page.locator('#confirm-dialog').getByRole('button', { name: '取消', exact: true }).click();
+  await page.evaluate(() => {
+    const original = window.AstrBotPluginPage.apiGet;
+    window.AstrBotPluginPage.apiGet = async (endpoint, params) => endpoint === 'raw'
+      ? { total: 2, items: [
+        { id: 4, source_kind: 'forward_node', content: '用户: <img src=x onerror=unsafe()> / 助手: ' + '引用文本'.repeat(120), created_at: Math.floor(Date.now() / 1000) },
+        { id: 5, source_kind: 'native', content: '助手: 群聊中的独立回复', created_at: Math.floor(Date.now() / 1000) },
+      ] }
+      : original(endpoint, params);
+  });
+  await page.locator('#clear-filters').click();
+  await page.locator('.long-text').waitFor();
+  assert.equal(await page.locator('.raw-event').first().locator('.msg.me, .msg.bot, .bubble img').count(), 0);
+  assert.equal(await page.locator('.msg.bot .record-text').textContent(), '群聊中的独立回复');
+  await page.locator('.long-text summary').click();
+  assert.match(await page.locator('.long-text p').textContent(), /<img src=x onerror=unsafe\(\)>/);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
 });
 
 test("forward source trees escape content and unsupported work cannot retry", async () => {
@@ -217,6 +284,7 @@ test("forward source trees escape content and unsupported work cannot retry", as
     };
   });
   await page.locator('[data-tab="raw"]').click();
+  await page.locator('.message-menu').first().locator('summary').click();
   await page.locator('[data-open-event]').first().click();
   await page.locator('#source-body').getByText("节点 1.2.3", { exact: true }).waitFor();
   assert.equal(await page.locator("#source-body script, #source-body img").count(), 0);
@@ -281,7 +349,7 @@ test("batch deletion requires confirmation and sends only selected page IDs", as
   assert.deepEqual(saved, { endpoint: 'records/delete', payload: { scope_type: 'private', scope_key: 'test:小张', kind: 'memories', ids: [1,3] } });
 });
 
-test("raw filters and search paginate server-side and discard stale search responses", async () => {
+test("raw filters and search use cursors and discard stale search responses", async () => {
   await page.evaluate(() => {
     const original = window.AstrBotPluginPage.apiGet;
     window.browseRequests = [];
@@ -289,23 +357,114 @@ test("raw filters and search paginate server-side and discard stale search respo
       if (endpoint !== 'browse') return original(endpoint, params);
       window.browseRequests.push(params);
       if (params.q === '旧搜索') return new Promise(resolve => { window.releaseOldSearch = () => resolve({ items: [{ id: 99, content: '过时结果', created_at: 1234 }], total: 1, page: 1 }); });
-      return { items: [{ id: 30, content: params.q || '新结果', created_at: 1234 }], total: 45, page: params.page, page_size: 20 };
+      return { items: [{ id: params.before ? 29 : 30, content: params.q || '新结果', created_at: 1234 }], has_more: !params.before, next_cursor: params.before ? null : '1234:30' };
     };
   });
   await page.locator('[data-tab="raw"]').click();
   await page.locator('#search').fill('旧搜索');
   await page.waitForFunction(() => typeof window.releaseOldSearch === 'function');
   await page.locator('#search').fill('新搜索');
-  await page.locator('.bubble').getByText('新搜索', { exact: true }).waitFor();
+  await page.locator('.bubble').getByText('新搜索', { exact: true }).first().waitFor();
   await page.evaluate(() => window.releaseOldSearch());
   assert.equal(await page.getByText('过时结果', { exact: true }).count(), 0);
   await page.locator('[data-filter="source"]').selectOption('forwarded');
   await page.locator('[data-filter="since"]').fill('2026-09-01');
   await page.locator('[data-filter="since"]').dispatchEvent('change');
-  await page.locator('#next').click();
-  await page.waitForFunction(() => window.browseRequests.at(-1).page === 2);
+  await page.waitForFunction(() => window.browseRequests.at(-1).before === '1234:30');
+  assert.equal(await page.locator('#pager').isVisible(), false);
   const query = await page.evaluate(() => window.browseRequests.at(-1));
   assert.equal(query.kind, 'raw'); assert.equal(query.q, '新搜索'); assert.equal(query.source, 'forwarded'); assert.equal(typeof query.since, 'number');
+});
+
+test("raw history anchors prepends and bounds DOM while retaining expanded and selected records", async () => {
+  await page.evaluate(() => {
+    const original = window.AstrBotPluginPage.apiGet;
+    window.historyRequests = [];
+    window.holdOlder = true;
+    window.AstrBotPluginPage.apiGet = async (endpoint, params) => {
+      if (endpoint !== 'browse' || params.kind !== 'raw') return original(endpoint, params);
+      window.historyRequests.push(params);
+      const last = params.before ? Number(params.before.split(':')[1]) - 1 : 600;
+      const first = Math.max(1, last - 39);
+      const result = { items: Array.from({ length: last - first + 1 }, (_, i) => ({ id: last - i, created_at: 1234, content: last - i === 600 ? '很长的消息正文'.repeat(90) : `历史消息 ${last - i}`, source_kind: 'native' })), has_more: first > 1, next_cursor: first > 1 ? `1234:${first}` : null };
+      if (params.before && window.holdOlder) return new Promise(resolve => { window.releaseOlder = () => { window.holdOlder = false; resolve(result); }; });
+      return result;
+    };
+  });
+  await page.locator('[data-tab="raw"]').click();
+  await page.locator('[data-event-id="600"]').waitFor();
+  assert.equal(await page.locator('#pager').isVisible(), false);
+  await page.waitForFunction(() => { const el = document.getElementById('content'); return el.scrollHeight - el.scrollTop - el.clientHeight < 3; });
+  await page.locator('#content').evaluate(el => { el.scrollTop = 100; });
+  await page.waitForFunction(() => typeof window.releaseOlder === 'function');
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const anchor = await page.evaluate(() => {
+    const top = document.getElementById('content').getBoundingClientRect().top;
+    const row = [...document.querySelectorAll('.history-row')].find(el => el.getBoundingClientRect().bottom > top);
+    return { id: row.dataset.eventId, y: row.getBoundingClientRect().top };
+  });
+  await page.locator('#content').evaluate(el => { el.dispatchEvent(new Event('scroll')); el.dispatchEvent(new Event('scroll')); });
+  assert.equal(await page.evaluate(() => window.historyRequests.length), 2);
+  await page.evaluate(() => window.releaseOlder());
+  await page.waitForFunction(() => document.getElementById('result-count').textContent.includes('已加载 80 '));
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const after = await page.locator(`[data-event-id="${anchor.id}"]`).boundingBox();
+  assert.ok(Math.abs(after.y - anchor.y) < 3, `prepend moved anchor by ${after.y - anchor.y}px`);
+  for (let count = 120; count <= 600; count += 40) {
+    await page.locator('#content').evaluate(el => { el.scrollTop = 0; });
+    await page.waitForFunction(n => document.getElementById('result-count').textContent.includes(`已加载 ${n} `), count);
+    assert.ok(await page.locator('.history-row').count() <= 60);
+  }
+  assert.equal(await page.evaluate(() => window.historyRequests.length), 15);
+  await page.locator('#content').evaluate(el => { el.scrollTop = el.scrollHeight; });
+  await page.locator('[data-event-id="600"] .long-text summary').click();
+  await page.locator('#toggle-selection').click();
+  await page.locator('[data-select="600"]').check();
+  await page.locator('#content').evaluate(el => { el.scrollTop = 0; });
+  await page.locator('[data-event-id="1"]').waitFor();
+  await page.locator('#content').evaluate(el => { el.scrollTop = el.scrollHeight; });
+  await page.locator('[data-event-id="600"]').waitFor();
+  assert.equal(await page.locator('[data-select="600"]').isChecked(), true);
+  assert.equal(await page.locator('[data-event-id="600"] .long-text').evaluate(el => el.open), true);
+  await page.locator('#select-page').check();
+  assert.match(await page.locator('#selection-bar').textContent(), /已选 100 条/);
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.waitForFunction(() => document.documentElement.scrollWidth <= innerWidth);
+  assert.ok(await page.locator('.history-row').count() <= 60);
+});
+
+test("failed history loading retries and late scope results are discarded", async () => {
+  await page.evaluate(() => {
+    const original = window.AstrBotPluginPage.apiGet;
+    window.failHistory = true;
+    window.AstrBotPluginPage.apiGet = async (endpoint, params) => {
+      if (endpoint !== 'browse' || params.kind !== 'raw') return original(endpoint, params);
+      if (params.before && window.failHistory) { window.failHistory = false; throw new Error('Network unavailable'); }
+      if (params.before) return new Promise(resolve => { window.releaseHistory = () => resolve({ items: [{ id: 1, content: '旧会话迟到消息', created_at: 1234 }], has_more: false }); });
+      return { items: Array.from({ length: 40 }, (_, i) => ({ id: 80 - i, created_at: 1234, content: `消息 ${80 - i}` })), has_more: true, next_cursor: '1234:41' };
+    };
+  });
+  await page.locator('[data-tab="raw"]').click();
+  await page.locator('[data-event-id="80"]').waitFor();
+  await page.locator('#content').evaluate(el => { el.scrollTop = 0; });
+  await page.getByRole('button', { name: '加载失败 · 点击重试', exact: true }).click();
+  await page.waitForFunction(() => typeof window.releaseHistory === 'function');
+  await page.locator('[data-tab="memories"]').click();
+  await page.locator('.mem').first().waitFor();
+  await page.evaluate(() => window.releaseHistory());
+  assert.equal(await page.getByText('旧会话迟到消息', { exact: true }).count(), 0);
+  assert.equal(await page.locator('.mem').count(), 3);
+});
+
+test("mobile history opens at the latest message and scrolls inside the chat", async () => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.locator('[data-tab="raw"]').click();
+  await page.locator('.history-row').waitFor();
+  await page.waitForFunction(() => { const el = document.getElementById('content'); return el.scrollHeight - el.scrollTop - el.clientHeight < 3; });
+  assert.equal(await page.locator('#content').evaluate(el => getComputedStyle(el).overflowY), 'auto');
+  assert.equal(await page.locator('.msg.bot').isVisible(), true);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  if (process.env.MEMOIR_SCREENSHOT_DIR) await page.screenshot({ path: path.join(process.env.MEMOIR_SCREENSHOT_DIR, 'raw-mobile.png') });
 });
 
 test("global settings remain accessible without scopes and mobile drawer closes after selection", async () => {

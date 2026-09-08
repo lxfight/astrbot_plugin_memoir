@@ -179,6 +179,24 @@ class WebApi:
         }
         for key in ("since", "until", "importance"):
             filters[key] = request.query.get(key, 0, type=int)
+        cursor_mode = request.query.get("mode", "") == "cursor"
+        before = None
+        if cursor_mode:
+            if kind != "raw":
+                return error_response("cursor mode requires raw records")
+            value = request.query.get("before", "")
+            if value:
+                try:
+                    parts = value.split(":")
+                    if len(parts) != 2 or any(
+                        not part.isascii() or not part.isdecimal() for part in parts
+                    ):
+                        raise ValueError
+                    before = tuple(int(part) for part in parts)
+                    if not (0 <= before[0] < 2**63 and 0 < before[1] < 2**63):
+                        raise ValueError
+                except (ValueError, TypeError):
+                    return error_response("invalid history cursor")
         return json_response(
             await ctx[0].browse_records(
                 *scope,
@@ -186,6 +204,8 @@ class WebApi:
                 filters,
                 request.query.get("page", 1, type=int),
                 request.query.get("page_size", 20, type=int),
+                cursor_mode=cursor_mode,
+                before=before,
             )
         )
 

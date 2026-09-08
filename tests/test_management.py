@@ -215,6 +215,110 @@ async def test_management_http_validation_scope_and_effective_settings(store):
                 "/delete_records", json={**scope, "kind": "raw", "ids": ids}
             )
             assert response.status_code == 400
+        for before in (
+            "invalid",
+            "1:2:3",
+            "1:-2",
+            "1:0",
+            "1:999999999999999999999",
+            "１:2",
+        ):
+            response = await client.get(
+                "/browse",
+                params={**scope, "kind": "raw", "mode": "cursor", "before": before},
+            )
+            assert response.status_code == 400
+        response = await client.get(
+            "/browse", params={**scope, "kind": "memories", "mode": "cursor"}
+        )
+        assert response.status_code == 400
+        response = await client.get(
+            "/browse", params={**scope, "kind": "raw", "mode": "cursor"}
+        )
+        assert response.json() == {"items": [], "has_more": False, "next_cursor": None}
+
+
+@pytest.mark.asyncio
+async def test_history_cursor_ties_deletion_new_arrivals_and_index(store):
+    ids = [
+        await store.insert_raw_turn(
+            scope_type="private", scope_key="test:u1", content=f"消息 {i}"
+        )
+        for i in range(125)
+    ]
+    await store.connection.execute("UPDATE raw_turns SET created_at=100")
+    await store.connection.commit()
+    await store.insert_raw_turn(
+        scope_type="group", scope_key="test:u1", content="隔离消息"
+    )
+    statements = []
+    await store.connection.set_trace_callback(statements.append)
+    first = await store.browse_records(
+        "private", "test:u1", "raw", {}, page_size=40, cursor_mode=True
+    )
+    assert [row["id"] for row in first["items"]] == ids[-40:][::-1]
+    boundary = first["items"][-1]["id"]
+    await store.delete_records("raw", [boundary], "private", "test:u1")
+    await store.insert_raw_turn(
+        scope_type="private", scope_key="test:u1", content="刚收到的消息"
+    )
+    seen = [row["id"] for row in first["items"]]
+    result = first
+    while result["has_more"]:
+        result = await store.browse_records(
+            "private",
+            "test:u1",
+            "raw",
+            {},
+            page_size=40,
+            cursor_mode=True,
+            before=tuple(map(int, result["next_cursor"].split(":"))),
+        )
+        seen.extend(row["id"] for row in result["items"])
+    assert seen == ids[::-1]
+    assert len(seen) == len(set(seen)) and result["next_cursor"] is None
+    assert not any(
+        "OFFSET" in sql or "SELECT COUNT(*) FROM (" in sql for sql in statements
+    )
+    plan = await store.connection.execute(
+        "EXPLAIN QUERY PLAN SELECT id FROM raw_turns INDEXED BY idx_raw_history WHERE scope_type=? AND scope_key=? AND parent_id IS NULL AND (created_at,id)<(?,?) ORDER BY created_at DESC,id DESC LIMIT 41",
+        ("private", "test:u1", 100, boundary),
+    )
+    assert any(
+        "idx_raw_history" in row[3] and "SEARCH" in row[3]
+        for row in await plan.fetchall()
+    )
+
+
+@pytest.mark.asyncio
+async def test_cursor_filters_search_children_without_returning_chunks(store):
+    handler = EventHandler(SimpleNamespace(), BASE_CONFIG, store)
+    await handler.on_group_message(
+        forward_event(
+            [Node(name="引用作者", content=[Plain(text="长文" * 3000 + "尾部特征")])]
+        )
+    )
+    await handler.media.process_once()
+    result = await store.browse_records(
+        "group",
+        "test:g1",
+        "raw",
+        {"q": "尾部特征", "source": "forwarded", "sender": "u1", "status": "complete"},
+        cursor_mode=True,
+    )
+    assert len(result["items"]) == 1
+    root = result["items"][0]
+    assert root["parent_id"] is None and root["chunk_count"] > 1
+    assert not result["has_more"] and "total" not in result
+    assert not (
+        await store.browse_records(
+            "group",
+            "test:g1",
+            "raw",
+            {"since": root["created_at"] + 1},
+            cursor_mode=True,
+        )
+    )["items"]
 
 
 @pytest.mark.asyncio

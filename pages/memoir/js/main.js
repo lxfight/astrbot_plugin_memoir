@@ -4,7 +4,7 @@ import { bridge, safe } from "./api.js";
 import { initTheme } from "./theme.js";
 import { renderOverview, renderSidebar, renderDetailHead } from "./sidebar.js";
 import { loadMemories } from "./memories.js";
-import { loadRaw } from "./raw.js";
+import { loadRaw, stopRawHistory, toggleRawSelection } from "./raw-history.js";
 import { renderFilters, renderSelection } from "./list.js";
 import { ask, canLeave, isDirty, openEditor, openSources, openRawEvent } from "./dialogs.js";
 import { loadScopeConfigTab, resetScopeConfig, loadConsentPage, loadProcessingPage, loadProcessingStatus, stopProcessing } from "./settings.js";
@@ -15,6 +15,7 @@ let navigating = false;
 
 async function loadTab() {
   stopProcessing();
+  stopRawHistory();
   const records = ["memories", "raw"].includes(state.tab);
   $("search-wrap").style.display = records && state.scope ? "flex" : "none";
   $("pager").style.display = "none";
@@ -122,6 +123,10 @@ function bindEvents() {
   };
   $("scope-backdrop").onclick = () => { closeDrawer(); $("scope-toggle").focus(); };
   document.addEventListener("keydown", e => {
+    if (e.key === "Escape") {
+      const menu = document.querySelector(".message-menu[open]");
+      if (menu) { menu.open = false; menu.querySelector("summary").focus(); e.preventDefault(); return; }
+    }
     if (!$("scope-sidebar").classList.contains("drawer-open")) return;
     if (e.key === "Escape") { closeDrawer(); $("scope-toggle").focus(); }
     if (e.key === "Tab") {
@@ -131,9 +136,15 @@ function bindEvents() {
     }
   });
   matchMedia("(max-width: 700px)").addEventListener("change", closeDrawer);
+  document.addEventListener("click", e => {
+    document.querySelectorAll(".message-menu[open]").forEach(menu => {
+      if (!menu.contains(e.target) || e.target.closest("button")) menu.open = false;
+    });
+  });
   closeDrawer();
   $("detail-head").onclick = e => { if (e.target.closest("#clear-scope")) clearScope(); };
   $("search").oninput = e => {
+    stopRawHistory();
     clearTimeout(state.searchTimer); state.q = e.target.value.trim(); state.page = 1; state.selected.clear();
     // Invalidate an older result immediately, before the debounced request begins.
     state.loadVersion++;
@@ -145,11 +156,15 @@ function bindEvents() {
   };
   $("filters").onclick = e => {
     if (e.target.closest("#clear-filters")) { state.q = ""; state.filters = {}; state.page = 1; state.selected.clear(); loadTab(); }
-    if (e.target.closest("#toggle-selection")) { state.selecting = !state.selecting; state.selected.clear(); loadTab(); }
+    if (e.target.closest("#toggle-selection")) {
+      state.selecting = !state.selecting; state.selected.clear();
+      if (state.tab === "raw") { renderFilters(); toggleRawSelection(); }
+      else loadTab();
+    }
   };
   $("selection-bar").onchange = e => {
     if (e.target.id !== "select-page") return;
-    state.selected = new Set(e.target.checked ? state.items.map(row => row.id) : []);
+    state.selected = new Set(e.target.checked ? (state.tab === "raw" ? state.items.slice(-100) : state.items).map(row => row.id) : []);
     $("content").querySelectorAll("[data-select]").forEach(input => { input.checked = state.selected.has(Number(input.dataset.select)); }); renderSelection();
   };
   $("selection-bar").onclick = e => { if (e.target.closest("#delete-selection")) removeRecords(state.tab, [...state.selected]); };
@@ -180,7 +195,11 @@ function bindEvents() {
   };
   $("content").onchange = async e => {
     const selected = e.target.closest("[data-select]");
-    if (selected) { const id = Number(selected.dataset.select); selected.checked ? state.selected.add(id) : state.selected.delete(id); renderSelection(); return; }
+    if (selected) {
+      const id = Number(selected.dataset.select);
+      if (selected.checked && state.selected.size >= 100) { selected.checked = false; toast("一次最多选择 100 条，请分批操作", "err"); return; }
+      selected.checked ? state.selected.add(id) : state.selected.delete(id); renderSelection(); return;
+    }
     const input = e.target.closest("[data-consent]"); if (!input || input.disabled) return;
     const split = input.dataset.consent.indexOf("|");
     input.disabled = true;
