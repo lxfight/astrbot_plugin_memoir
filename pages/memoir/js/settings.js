@@ -8,9 +8,9 @@ const GLOBAL_FIELDS = [
   {
     section: "基础",
     items: [
-      { key: "enable_private_memory", label: "启用私聊记忆", type: "switch", hint: "关闭后所有私聊不进行记忆捕获与召回" },
-      { key: "enable_group_memory", label: "启用群聊记忆", type: "switch", hint: "关闭后所有群聊不进行记忆捕获与召回" },
-      { key: "background_llm_provider", label: "后台小模型", type: "provider", hint: "用于巩固及图片/语音解析，留空则用当前会话模型；媒体按提供商的模型能力处理，每条额外调用一次" },
+      { key: "enable_private_memory", label: "启用私聊记忆", type: "switch", hint: "默认开启，保存用户与助手的私聊轮次。关闭后停止捕获、召回与巩固，已有数据需单独清空" },
+      { key: "enable_group_memory", label: "启用群聊记忆", type: "switch", hint: "默认开启：会被动记录机器人收到的群消息，无需 @ 或触发回复；指令和忽略规则仍生效。后台巩固会把原文发送给所选模型。关闭后停止捕获、召回与巩固，已有数据需单独清空" },
+      { key: "background_llm_provider", label: "后台小模型", type: "provider", hint: "巩固会发送本批原文与相关记忆，留空则用当前会话模型。巩固可能分批调用和重试；每条受支持媒体通常额外调用 1 次描述模型，手动重试会再次调用。费用按提供商计费" },
     ],
   },
   {
@@ -25,7 +25,7 @@ const GLOBAL_FIELDS = [
   {
     section: "巩固与遗忘",
     items: [
-      { key: "consolidation_scan_interval_minutes", label: "扫描周期（分钟）", type: "number", min: 1, max: 1440 },
+      { key: "consolidation_scan_interval_minutes", label: "扫描周期（分钟）", type: "number", min: 1, max: 1440, hint: "积压时单会话每轮最多处理 3 批，每批通常调用 1 次模型；输出校验失败时最多重试 1 次" },
       { key: "consolidation_count_threshold_private", label: "私聊触发阈值（轮）", type: "number", min: 1, max: 500 },
       { key: "consolidation_count_threshold_group", label: "群聊触发阈值（条）", type: "number", min: 1, max: 1000 },
       { key: "consolidation_idle_hours", label: "静默触发（小时）", type: "number", min: 1, max: 168 },
@@ -45,11 +45,11 @@ const GLOBAL_FIELDS = [
 
 const SCOPE_FIELDS = [
   { key: "recall_max_chars", label: "召回总字符预算", type: "inherit-number" },
-  { key: "enabled", label: "启用本会话记忆", type: "inherit-switch", hint: "关闭后该会话不再捕获与召回" },
+  { key: "enabled", label: "启用本会话记忆", type: "inherit-switch", hint: "关闭后停止本会话的捕获、召回与巩固，已有数据需单独清空；全局类型开关关闭时，本项不能重新开启记忆" },
   { key: "recall_top_k", label: "线索召回条数", type: "inherit-number" },
   { key: "recall_core_top_k", label: "常驻记忆条数", type: "inherit-number" },
   { key: "recall_recent_turns", label: "群聊近因条数", type: "inherit-number", groupOnly: true },
-  { key: "consolidation_count_threshold", label: "巩固触发阈值", type: "inherit-number", hint: "积攒多少轮原文后触发一次抽取" },
+  { key: "consolidation_count_threshold", label: "巩固触发阈值", type: "inherit-number", hint: "未抽取原文达到该数量后可触发巩固；积压和重试可能产生多次模型调用" },
   { key: "consolidation_idle_hours", label: "静默触发（小时）", type: "inherit-number" },
   { key: "bridge_enabled", label: "允许自我陈述桥接", type: "inherit-switch", groupOnly: true, hint: "叠加在用户授权之上" },
   { key: "bridge_max_sensitivity", label: "敏感度上限", type: "inherit-select", options: ["low", "medium", "high"], groupOnly: true },
@@ -138,7 +138,7 @@ export async function loadScopeConfigTab() {
     </div>
     <div class="form-card" id="global-config-form"${stagger(1)}>
       <div class="form-title"><i data-lucide="globe"></i>全局默认配置</div>
-      <p class="form-sub">对所有未单独配置的会话生效</p>
+      <p class="form-sub">未覆盖的会话使用这些默认值；私聊和群聊总开关对所有对应会话生效，全局关闭优先</p>
       ${globalRows}
       <div class="form-actions">
         <button class="btn primary" id="save-global-cfg"><i data-lucide="check"></i>保存全局配置</button>
