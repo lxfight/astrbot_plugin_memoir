@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-08
+
 ### 修复与优化
 
 - 原文对话改为 Telegram 风格的连续聊天流：左右气泡、圆形头像、轻量聊天背景、气泡内时间与状态，移除整轮卡片外框；转发气泡可直接展开，完整查看、复制和删除收进消息菜单，保留批量管理及移动端适配。
@@ -112,7 +114,9 @@
 - 收窄模型巩固指令与原文数据混合造成的提示注入影响面。
 - 拆分 WebUI 样式与 ES 模块，增加完整记忆流程回归测试。
 
-[Unreleased]: https://github.com/lxfight/astrbot_plugin_memoir/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/lxfight/astrbot_plugin_memoir/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.6.0
+[0.5.0]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.5.0
 [0.4.1]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.4.1
 [0.4.0]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.4.0
 [0.3.0.dev0]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.3.0.dev0
