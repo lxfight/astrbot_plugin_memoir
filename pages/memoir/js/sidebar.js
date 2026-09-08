@@ -1,4 +1,4 @@
-import { $, state } from "./state.js";
+import { $, state, sameScope } from "./state.js";
 import { esc, refreshIcons, timeAgo, emptyState, stagger, REDUCED_MOTION } from "./utils.js";
 
 /* ---------- stats & sidebar ---------- */
@@ -21,7 +21,7 @@ export function renderOverview(totals) {
   const items = [
     ["c-scope", "layers", "会话", totals.scopes],
     ["c-memory", "brain", "结构化记忆", totals.memories],
-    ["c-raw", "messages-square", "原文轮次", totals.raw_turns],
+    ["c-raw", "messages-square", "原始消息", totals.raw_turns],
     ["c-pending", "clock-3", "待巩固", totals.pending],
   ];
   $("cards").innerHTML = items
@@ -62,7 +62,7 @@ export function renderSidebar() {
     if (!list.length) continue;
     html += `<div class="group-title"><i data-lucide="${icon}"></i>${label}<span class="count">${list.length}</span></div>`;
     for (const s of list) {
-      const active = state.scope && state.scope.scope_key === s.scope_key;
+      const active = sameScope(state.scope, s);
       html += `
         <button class="scope-item ${active ? "active" : ""}" data-scope="${esc(s.scope_type)}|${esc(s.scope_key)}"${stagger(i, 40)}>
           <span class="chip"><i data-lucide="${icon}"></i></span>
@@ -82,10 +82,17 @@ export function renderSidebar() {
 /* ---------- detail ---------- */
 export function renderDetailHead() {
   const s = state.scopes.find(
-    (x) => state.scope && x.scope_key === state.scope.scope_key,
+    (x) => sameScope(state.scope, x),
   );
-  const hasOverride = Object.keys(state.scopeOverride).length > 0;
-  const disabled = state.scopeOverride.enabled === false;
+  const hasOverride = s?.custom;
+  const disabled = s?.enabled === false;
+  if (["global", "consents"].includes(state.tab)) {
+    $("detail-head").innerHTML = `<div><div class="name">${state.tab === "global" ? "全局设置" : "桥接授权"}</div><div class="sub">对所有会话生效</div></div>`;
+    $("mobile-title").textContent = state.tab === "global" ? "全局设置" : "桥接授权";
+    return;
+  }
+  $("mobile-title").textContent = state.scope ? scopeName(state.scope) : "记忆管理";
+  if (!state.scope) { $("detail-head").innerHTML = ""; return; }
   $("detail-head").innerHTML = `
     <span class="chip"><i data-lucide="${s?.scope_type === "group" ? "users-round" : "user-round"}"></i></span>
     <div style="min-width:0">
@@ -96,7 +103,7 @@ export function renderDetailHead() {
       s
         ? `<div class="head-stats">
             <span class="hstat"><i data-lucide="brain"></i>${s.memory_count} 记忆</span>
-            <span class="hstat"><i data-lucide="messages-square"></i>${s.raw_count} 原文</span>
+            <span class="hstat"><i data-lucide="messages-square"></i>${s.raw_count} 消息${s.chunk_count ? ` · ${s.chunk_count} 分块` : ""}</span>
             ${s.pending_count ? `<span class="hstat h-pending"><i data-lucide="clock-3"></i>${s.pending_count} 待巩固</span>` : ""}
           </div>`
         : '<div style="flex:1"></div>'

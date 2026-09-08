@@ -1,237 +1,206 @@
-import { $, RETRY_LOADERS, state } from "./state.js";
-import { esc, refreshIcons, toast } from "./utils.js";
+import { $, RETRY_LOADERS, sameScope, state } from "./state.js";
+import { esc, emptyState, refreshIcons, toast } from "./utils.js";
 import { bridge, safe } from "./api.js";
-import { initParticles } from "./particles.js";
 import { initTheme } from "./theme.js";
 import { renderOverview, renderSidebar, renderDetailHead } from "./sidebar.js";
 import { loadMemories } from "./memories.js";
 import { loadRaw } from "./raw.js";
-import { loadScopeConfigTab, saveScopeConfig, resetScopeConfig, saveGlobalConfig, loadProcessingStatus } from "./settings.js";
+import { renderFilters, renderSelection } from "./list.js";
+import { ask, canLeave, isDirty, openEditor, openSources, openRawEvent } from "./dialogs.js";
+import { loadScopeConfigTab, resetScopeConfig, loadConsentPage, loadProcessingPage, loadProcessingStatus, stopProcessing } from "./settings.js";
 
-// Toast rejections raised by page modules only; content scripts from
-// browser extensions also bubble into this handler and stay console-only
-const isOwnRejection = (reason) => {
-  const stack = reason instanceof Error ? reason.stack : "";
-  return typeof stack === "string" && stack.includes("/api/plugin/page/");
-};
+const globalView = () => ["global", "consents"].includes(state.tab);
+const viewKey = () => JSON.stringify([state.scope?.scope_type, state.scope?.scope_key, state.tab]);
+let navigating = false;
 
-window.addEventListener("unhandledrejection", (e) => {
-  console.error("[Memoir] unhandled:", e.reason);
-  if (isOwnRejection(e.reason)) toast(`出错了：${e.reason?.message || e.reason}`, "err");
-});
-window.addEventListener("error", (e) => {
-  console.error("[Memoir] runtime error:", e.error || e.message);
-});
-
-/* ---------- tabs & events ---------- */
 async function loadTab() {
-  $("search-wrap").style.display = state.tab === "memories" ? "flex" : "none";
-  if (state.tab === "settings") $("pager").style.display = "none";
-  if (!state.scope) {
-    state.loadVersion++;
-    $("pager").style.display = "none";
-    $("detail-head").innerHTML = "";
-    $("content").innerHTML = renderNoScope();
-    refreshIcons();
-    return;
-  }
+  stopProcessing();
+  const records = ["memories", "raw"].includes(state.tab);
+  $("search-wrap").style.display = records && state.scope ? "flex" : "none";
+  $("pager").style.display = "none";
+  $("selection-bar").hidden = true;
+  $("filters").innerHTML = "";
+  $("tabs").hidden = globalView();
+  document.querySelectorAll("[data-tab]").forEach(button => {
+    const active = button.dataset.tab === state.tab;
+    button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active));
+  });
+  document.querySelectorAll("[data-view]").forEach(button => button.classList.toggle("active", button.dataset.view === state.tab));
   renderDetailHead();
-  if (state.tab === "memories") await loadMemories();
-  else if (state.tab === "raw") await loadRaw();
+  if (!state.scope && !globalView()) {
+    state.loadVersion++;
+    $("content").innerHTML = emptyState("inbox", "与机器人对话后，会话会出现在这里。也可以先打开全局设置调整记忆开关。", "还没有会话");
+  } else if (records) {
+    renderFilters();
+    await (state.tab === "memories" ? loadMemories() : loadRaw());
+  } else if (state.tab === "processing") {
+    $("filters").innerHTML = `<label>任务状态<select data-filter="task_status">${[["", "全部状态"], ["failed", "失败"], ["pending", "排队"], ["running", "处理中"], ["complete", "完成"]].map(([value, label]) => `<option value="${value}" ${state.filters.task_status === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>`;
+    await loadProcessingPage();
+  } else if (state.tab === "consents") await loadConsentPage();
   else await loadScopeConfigTab();
+  refreshIcons();
 }
 
-function renderNoScope() {
-  return `
-    <div class="empty">
-      <div class="empty-icon"><i data-lucide="inbox"></i></div>
-      <h3>还没有任何记忆</h3>
-      <p>与机器人对话后，会话会自动出现在这里</p>
-      <div class="empty-steps">
-        <span class="step"><i data-lucide="message-circle"></i>正常聊天</span>
-        <i data-lucide="arrow-right"></i>
-        <span class="step"><i data-lucide="sparkles"></i>后台自动巩固</span>
-        <i data-lucide="arrow-right"></i>
-        <span class="step"><i data-lucide="database"></i>在此管理</span>
-      </div>
-    </div>`;
-}
-
-async function clearScope() {
-  if (!state.scope) return;
-  if (!confirm(`确定清空会话 ${state.scope.scope_key} 的全部记忆与原文？此操作不可恢复。`)) return;
-  const res = await safe("清空会话", () => bridge.apiPost("scope/clear", state.scope));
-  if (res === null) return;
-  toast(`已清空 ${res.deleted ?? 0} 条记录`);
-  await refreshAll();
-}
-
-async function refreshAll(spin = false) {
+async function refreshOverview() {
   const version = ++state.overviewVersion;
-  $("refresh").classList.toggle("spinning", spin);
-  const overview = await safe("刷新概览", () => bridge.apiGet("overview"), { silent: true });
-  if (version !== state.overviewVersion) return false;
-  $("refresh").classList.remove("spinning");
-  if (!overview) {
-    toast("刷新失败：无法连接记忆服务", "err");
-    return false;
-  }
-  renderOverview(overview.totals);
-  state.scopes = overview.scopes || [];
-  if (state.scope) {
-    const cur = state.scopes.find((s) => s.scope_key === state.scope.scope_key);
-    if (!cur) state.scope = state.scopes[0] || null;
-  } else {
-    state.scope = state.scopes[0] || null;
-  }
-  renderSidebar();
-  await loadTab();
+  const result = await safe("刷新概览", () => bridge.apiGet("overview"));
+  if (!result || version !== state.overviewVersion) return false;
+  state.scopes = result.scopes || [];
+  const current = state.scopes.find(scope => sameScope(scope, state.scope)) || state.scopes[0];
+  state.scope = current ? { scope_type: current.scope_type, scope_key: current.scope_key } : null;
+  renderOverview(result.totals); renderSidebar(); renderDetailHead();
   return true;
 }
 
-function bindEvents() {
-  $("detail-head").addEventListener("click", (e) => {
-    if (e.target.closest("#clear-scope")) clearScope();
-  });
+function closeDrawer() {
+  $("scope-sidebar").classList.remove("drawer-open");
+  $("scope-toggle").setAttribute("aria-expanded", "false");
+  $("scope-backdrop").hidden = true;
+  $("scope-sidebar").inert = matchMedia("(max-width: 700px)").matches;
+  document.body.classList.remove("drawer-visible");
+  document.querySelector("main").inert = false;
+}
 
-  $("tabs").addEventListener("click", (e) => {
-    const tab = e.target.closest(".tab");
-    if (!tab) return;
-    document.querySelectorAll(".tab").forEach((t) => {
-      t.classList.toggle("active", t === tab);
-      t.setAttribute("aria-pressed", String(t === tab));
-    });
-    state.tab = tab.dataset.tab;
-    state.page = 1;
-    loadTab();
-  });
-
-  $("scope-list").addEventListener("click", (e) => {
-    const item = e.target.closest("[data-scope]");
-    if (!item) return;
-    const [scope_type, scope_key] = item.dataset.scope.split("|");
-    state.scope = { scope_type, scope_key };
-    state.scopeOverride = {};
-    state.page = 1;
-    renderSidebar();
-    loadTab();
-  });
-
-  $("scope-filter").addEventListener("input", (e) => {
-    state.scopeFilter = e.target.value;
-    renderSidebar();
-  });
-
-  $("search").addEventListener("input", (e) => {
+async function navigate(tab, scope = state.scope) {
+  if (navigating || state.busy) return;
+  navigating = true;
+  try {
+    if (!await canLeave()) return;
     clearTimeout(state.searchTimer);
-    state.searchTimer = setTimeout(() => {
-      state.q = e.target.value.trim();
-      state.page = 1;
-      if (state.scope && state.tab === "memories") loadMemories();
-    }, 300);
-  });
+    state.views.set(viewKey(), { q: state.q, filters: { ...state.filters }, page: state.page });
+    state.tab = tab; state.scope = scope;
+    const saved = state.views.get(viewKey()) || {};
+    state.q = saved.q || ""; state.filters = saved.filters || {}; state.page = saved.page || 1;
+    state.scopeOverride = {}; state.selected.clear(); state.selecting = false;
+    renderSidebar(); closeDrawer();
+    $("content").scrollTop = 0;
+    return loadTab();
+  } finally { navigating = false; }
+}
 
-  $("prev").addEventListener("click", () => {
-    if (state.page > 1) { state.page--; loadTab(); }
-  });
-  $("next").addEventListener("click", () => {
-    state.page++; loadTab();
-  });
+async function removeRecords(kind, ids) {
+  if (state.busy || !ids.length) return;
+  state.busy = true;
+  const scope = { ...state.scope };
+  const forwarded = kind === "raw" && ids.some(id => state.items.find(row => row.id === id)?.source_kind === "forward_root");
+  try {
+    const message = kind === "memories" ? "只删除选中的记忆，来源原文仍会保留。此操作不可恢复。" : forwarded ? "选中的转发事件将连同全部引用分块和解析任务删除；已提炼的记忆保留。此操作不可恢复。" : "删除所选原始消息及关联解析任务，已提炼的记忆保留。此操作不可恢复。";
+    if (!await ask(`删除 ${ids.length} 条${kind === "memories" ? "记忆" : "原始消息"}？`, message, "确认删除", true)) return;
+    const result = await safe("删除记录", () => bridge.apiPost("records/delete", { ...scope, kind, ids }));
+    if (result === null) return;
+    state.selected.clear(); toast(`已删除 ${result.deleted} 条选中记录`);
+    await refreshOverview(); await loadTab();
+  } finally { state.busy = false; }
+}
 
-  $("content").addEventListener("click", async (e) => {
-    const retryWork = e.target.closest("[data-retry-work]");
-    if (retryWork) {
-      retryWork.disabled = true;
-      const result = await safe("重试处理", () => bridge.apiPost("processing/retry", { id: Number(retryWork.dataset.retryWork), scope_type: retryWork.dataset.scopeType, scope_key: retryWork.dataset.scopeKey }));
-      if (result !== null) toast("已加入重试队列");
-      if (retryWork.isConnected) { retryWork.disabled = false; loadProcessingStatus(); }
-      return;
+async function clearScope() {
+  if (!state.scope || state.busy || !await canLeave()) return;
+  state.busy = true;
+  const scope = { ...state.scope };
+  try {
+    if (!await ask("清空整个会话？", `${scope.scope_key} 的全部记忆、原始消息、转发分块和处理任务都会删除，且无法恢复。`, "清空会话", true)) return;
+    const result = await safe("清空会话", () => bridge.apiPost("scope/clear", scope));
+    if (result === null) return;
+    state.selected.clear(); state.page = 1; toast("会话已清空"); await refreshOverview(); await loadTab();
+  } finally { state.busy = false; }
+}
+
+function bindEvents() {
+  $("tabs").onclick = e => { const tab = e.target.closest("[data-tab]"); if (tab) navigate(tab.dataset.tab); };
+  document.querySelector(".global-nav").onclick = e => { const button = e.target.closest("[data-view]"); if (button) navigate(button.dataset.view); };
+  $("scope-list").onclick = e => {
+    const item = e.target.closest("[data-scope]"); if (!item) return;
+    const split = item.dataset.scope.indexOf("|");
+    navigate(globalView() ? "memories" : state.tab, { scope_type: item.dataset.scope.slice(0, split), scope_key: item.dataset.scope.slice(split + 1) });
+  };
+  $("scope-filter").oninput = e => { state.scopeFilter = e.target.value; renderSidebar(); };
+  $("scope-toggle").onclick = () => {
+    if ($("scope-sidebar").classList.contains("drawer-open")) { closeDrawer(); return; }
+    $("scope-sidebar").inert = false; $("scope-sidebar").classList.add("drawer-open");
+    $("scope-toggle").setAttribute("aria-expanded", "true"); $("scope-backdrop").hidden = false;
+    document.body.classList.add("drawer-visible"); document.querySelector("main").inert = true; $("scope-filter").focus();
+  };
+  $("scope-backdrop").onclick = () => { closeDrawer(); $("scope-toggle").focus(); };
+  document.addEventListener("keydown", e => {
+    if (!$("scope-sidebar").classList.contains("drawer-open")) return;
+    if (e.key === "Escape") { closeDrawer(); $("scope-toggle").focus(); }
+    if (e.key === "Tab") {
+      const controls = [...$("scope-sidebar").querySelectorAll("button,input,select")].filter(el => !el.disabled && el.offsetParent !== null);
+      if (e.shiftKey && document.activeElement === controls[0]) { e.preventDefault(); controls.at(-1)?.focus(); }
+      else if (!e.shiftKey && document.activeElement === controls.at(-1)) { e.preventDefault(); controls[0]?.focus(); }
     }
-    if (e.target.closest("#refresh-processing")) { loadProcessingStatus(); return; }
-    if (e.target.closest("#save-scope-cfg")) { saveScopeConfig(); return; }
+  });
+  matchMedia("(max-width: 700px)").addEventListener("change", closeDrawer);
+  closeDrawer();
+  $("detail-head").onclick = e => { if (e.target.closest("#clear-scope")) clearScope(); };
+  $("search").oninput = e => {
+    clearTimeout(state.searchTimer); state.q = e.target.value.trim(); state.page = 1; state.selected.clear();
+    // Invalidate an older result immediately, before the debounced request begins.
+    state.loadVersion++;
+    state.searchTimer = setTimeout(() => { if (state.scope && ["memories", "raw"].includes(state.tab)) loadTab(); }, 300);
+  };
+  $("filters").onchange = e => {
+    const control = e.target.closest("[data-filter]"); if (!control) return;
+    state.filters[control.dataset.filter] = control.value; state.page = 1; state.selected.clear(); loadTab();
+  };
+  $("filters").onclick = e => {
+    if (e.target.closest("#clear-filters")) { state.q = ""; state.filters = {}; state.page = 1; state.selected.clear(); loadTab(); }
+    if (e.target.closest("#toggle-selection")) { state.selecting = !state.selecting; state.selected.clear(); loadTab(); }
+  };
+  $("selection-bar").onchange = e => {
+    if (e.target.id !== "select-page") return;
+    state.selected = new Set(e.target.checked ? state.items.map(row => row.id) : []);
+    $("content").querySelectorAll("[data-select]").forEach(input => { input.checked = state.selected.has(Number(input.dataset.select)); }); renderSelection();
+  };
+  $("selection-bar").onclick = e => { if (e.target.closest("#delete-selection")) removeRecords(state.tab, [...state.selected]); };
+  $("prev").onclick = () => { if (state.page > 1) { state.page--; state.selected.clear(); loadTab(); } };
+  $("next").onclick = () => { state.page++; state.selected.clear(); loadTab(); };
+  $("refresh").onclick = async () => { if (!state.busy && await canLeave()) { clearTimeout(state.searchTimer); await refreshOverview(); await loadTab(); } };
+  $("content").onclick = async e => {
+    const scope = { ...state.scope };
+    const retry = e.target.closest("[data-retry]"); if (retry) { RETRY_LOADERS[retry.dataset.retry]?.(); return; }
+    const sources = e.target.closest("[data-sources]"); if (sources) { openSources(Number(sources.dataset.sources), scope); return; }
+    const event = e.target.closest("[data-open-event]"); if (event) { openRawEvent(Number(event.dataset.openEvent), scope); return; }
+    const edit = e.target.closest("[data-edit-memory]");
+    if (edit) { const row = state.items.find(row => row.id === Number(edit.dataset.editMemory)); if (row) openEditor(row, scope, async () => { await refreshOverview(); await loadTab(); }); return; }
+    const copy = e.target.closest("[data-copy]");
+    if (copy) { try { await navigator.clipboard.writeText(state.items.find(row => row.id === Number(copy.dataset.copy))?.content || ""); toast("已复制"); } catch { toast("无法使用剪贴板，请选择正文复制", "err"); } return; }
+    const memory = e.target.closest("[data-del-memory]"), raw = e.target.closest("[data-del-raw]");
+    if (memory || raw) { removeRecords(memory ? "memories" : "raw", [Number(memory?.dataset.delMemory || raw.dataset.delRaw)]); return; }
+    const tag = e.target.closest("[data-tag]"); if (tag) { state.q = tag.dataset.tag; state.page = 1; state.selected.clear(); loadTab(); return; }
     if (e.target.closest("#reset-scope-cfg")) { resetScopeConfig(); return; }
-    if (e.target.closest("#save-global-cfg")) { saveGlobalConfig(); return; }
-    const retry = e.target.closest("[data-retry]");
-    if (retry) {
-      const fn = RETRY_LOADERS[retry.dataset.retry];
-      if (fn) fn();
-      return;
+    if (e.target.closest("#refresh-processing")) { loadProcessingStatus(true); return; }
+    const work = e.target.closest("[data-retry-work]");
+    if (work && !work.disabled) {
+      work.disabled = true;
+      const result = await safe("重试任务", () => bridge.apiPost("processing/retry", { id: Number(work.dataset.retryWork), scope_type: work.dataset.scopeType, scope_key: work.dataset.scopeKey }));
+      if (result !== null) toast("已加入重试队列");
+      if (work.isConnected) { work.disabled = false; loadProcessingStatus(true); }
     }
-    const tagChip = e.target.closest("[data-tag]");
-    if (tagChip && state.tab === "memories") {
-      $("search").value = tagChip.dataset.tag;
-      state.q = tagChip.dataset.tag;
-      state.page = 1;
-      loadMemories();
-      return;
-    }
-    const delMemory = e.target.closest("[data-del-memory]");
-    const delRaw = e.target.closest("[data-del-raw]");
-    if (delMemory && confirm("确定删除这条记忆？")) {
-      const ok = await safe("删除记忆", () =>
-        bridge.apiPost("memories/delete", { id: Number(delMemory.dataset.delMemory), ...state.scope }),
-      );
-      if (ok !== null) {
-        toast("已删除");
-        loadTab();
-      }
-    } else if (delRaw && confirm("确定删除这轮对话？")) {
-      const ok = await safe("删除原文", () =>
-        bridge.apiPost("raw/delete", { id: Number(delRaw.dataset.delRaw), ...state.scope }),
-      );
-      if (ok !== null) {
-        toast("已删除");
-        loadTab();
-      }
-    }
-  });
-
-  $("content").addEventListener("change", async (e) => {
-    const input = e.target.closest("[data-consent]");
-    if (!input) return;
-    const [platform, sender_id] = input.dataset.consent.split("|");
-    const ok = await safe("更新授权", () =>
-      bridge.apiPost("consents/toggle", { platform, sender_id, enabled: input.checked }),
-    );
-    if (ok !== null) toast(input.checked ? "已开启授权" : "已关闭授权");
-    else input.checked = !input.checked;
-  });
-
-  $("content").addEventListener("toggle", async (event) => {
-    const details = event.target;
-    if (!details.matches("[data-memory-source]") || !details.open || details.dataset.loaded) return;
-    const box = details.querySelector(".source-content");
-    details.dataset.loaded = "loading";
-    const result = await safe("查看来源", () => bridge.apiGet("memories/sources", { id: Number(details.dataset.memorySource), scope_type: details.dataset.scopeType, scope_key: details.dataset.scopeKey }));
-    if (!details.isConnected) return;
-    if (!result) { delete details.dataset.loaded; box.textContent = "来源加载失败，重新展开可重试"; return; }
-    box.innerHTML = result.items.map((item) => `<p><small>#${item.id} · ${esc(item.speaker_name || "对话")}</small><br>${esc(item.content)}</p>`).join("") + (result.expired ? `<p>${result.expired} 条来源已过期或删除</p>` : "") + (!result.tracked ? "历史记忆未记录来源" : "");
-  }, true);
-
-  $("refresh").addEventListener("click", () => refreshAll(true));
+  };
+  $("content").onchange = async e => {
+    const selected = e.target.closest("[data-select]");
+    if (selected) { const id = Number(selected.dataset.select); selected.checked ? state.selected.add(id) : state.selected.delete(id); renderSelection(); return; }
+    const input = e.target.closest("[data-consent]"); if (!input || input.disabled) return;
+    const split = input.dataset.consent.indexOf("|");
+    input.disabled = true;
+    const result = await safe("更新授权", () => bridge.apiPost("consents/toggle", { platform: input.dataset.consent.slice(0, split), sender_id: input.dataset.consent.slice(split + 1), enabled: input.checked }));
+    if (result === null) input.checked = !input.checked;
+    else { toast("授权已更新"); input.closest(".consent-row").querySelector(".consent-state").textContent = input.checked ? "已授权" : "未授权"; }
+    input.disabled = false;
+  };
+  window.addEventListener("beforeunload", e => { if (isDirty()) { e.preventDefault(); e.returnValue = ""; } });
+  document.addEventListener("visibilitychange", () => { if (document.hidden) stopProcessing(); else if (state.tab === "processing") loadProcessingStatus(); });
+  document.addEventListener("memoir:changed", async () => { await refreshOverview(); if (["memories", "raw"].includes(state.tab)) await loadTab(); });
 }
 
+RETRY_LOADERS.settings = loadScopeConfigTab;
+RETRY_LOADERS.consents = loadConsentPage;
+RETRY_LOADERS.overview = refreshOverview;
 async function main() {
-  const updateThemeContext = initTheme();
-  initParticles();
-  bindEvents();
-  refreshIcons();
-  const ctx = await bridge.ready();
-  updateThemeContext(ctx);
-  bridge.onContext(updateThemeContext);
-  await refreshAll();
+  const updateTheme = initTheme(); bindEvents(); refreshIcons();
+  const context = await bridge.ready(); updateTheme(context); bridge.onContext(updateTheme);
+  if (await refreshOverview()) await loadTab();
+  else { $("content").innerHTML = emptyState("unplug", "无法加载会话，可点击侧栏刷新重试。"); }
 }
-
-RETRY_LOADERS.overview = () => refreshAll(true);
-
-main().catch((err) => {
-  const msg = err?.message || String(err);
-  $("content").innerHTML = `
-    <div class="error-panel">
-      <div class="empty-icon"><i data-lucide="unplug"></i></div>
-      <h3>无法加载记忆管理页</h3>
-      <p class="err-msg">${esc(msg)}</p>
-      <button class="btn" onclick="location.reload()"><i data-lucide="rotate-cw"></i>重新加载</button>
-    </div>`;
-  refreshIcons();
-});
+main().catch(error => { $("content").innerHTML = `<div class="error-panel"><h3>无法加载记忆管理页</h3><p>${esc(error.message)}</p><button class="btn" onclick="location.reload()">重新加载</button></div>`; });

@@ -225,6 +225,14 @@ class MemoryStore:
             await self.connection.execute(
                 "UPDATE memories SET subject_id = 'legacy:' || subject WHERE scope_type = 'group' AND subject IS NOT NULL"
             )
+        for name, definition in (
+            ("edit_revision", "INTEGER NOT NULL DEFAULT 0"),
+            ("manually_edited_at", "INTEGER"),
+        ):
+            if name not in columns:
+                await self.connection.execute(
+                    f"ALTER TABLE memories ADD COLUMN {name} {definition}"
+                )
         cursor = await self.connection.execute("PRAGMA table_info(raw_turns)")
         raw_columns = {row[1] for row in await cursor.fetchall()}
         for name, definition in (
@@ -321,6 +329,210 @@ class MemoryStore:
         if self.connection:
             await self.connection.close()
             self.connection = None
+
+    @serialized
+    async def browse_records(
+        self, scope_type, scope_key, kind, filters, page=1, page_size=20
+    ):
+        """Browse scoped records with exact counts and event-level raw pagination.
+
+        Args:
+            scope_type: Conversation type.
+            scope_key: Conversation identifier.
+            kind: Either memories or raw.
+            filters: Validated search and filter values.
+            page: One-based requested page, clamped after deletion.
+            page_size: Bounded page size.
+
+        Returns:
+            Items, total matches, and the effective page.
+        """
+        if kind not in {"memories", "raw"}:
+            raise ValueError("Invalid record kind")
+        conditions = ["r.scope_type=?", "r.scope_key=?"]
+        params = [scope_type, scope_key]
+        query = str(filters.get("q") or "").strip()[:200]
+        pattern = "%" + _escape_like(query) + "%"
+        source = filters.get("source")
+        if kind == "raw":
+            conditions.append("r.parent_id IS NULL")
+            select = """r.*, (SELECT COUNT(*) FROM raw_turns c WHERE c.parent_id=r.id) AS chunk_count,
+                COALESCE((SELECT CASE WHEN w.status='failed' THEN CASE WHEN json_extract(r.source_meta,'$.status') IN ('partial','unsupported') THEN json_extract(r.source_meta,'$.status') ELSE 'failed' END ELSE w.status END
+                    FROM work_items w WHERE w.raw_id=r.id ORDER BY w.id DESC LIMIT 1),
+                    json_extract(r.source_meta,'$.status'), CASE r.extracted WHEN -1 THEN 'failed' WHEN 0 THEN 'unextracted' ELSE 'complete' END) AS processing_status"""
+            if query:
+                conditions.append(
+                    "(r.content LIKE ? ESCAPE '\\' OR EXISTS(SELECT 1 FROM raw_turns c WHERE c.parent_id=r.id AND c.content LIKE ? ESCAPE '\\'))"
+                )
+                params.extend([pattern, pattern])
+            if source in {"native", "forwarded"}:
+                conditions.append(
+                    "r.source_kind "
+                    + ("=" if source == "native" else "!=")
+                    + " 'native'"
+                )
+            sender = str(filters.get("sender") or "").strip()[:100]
+            if sender:
+                conditions.append(
+                    "(r.speaker_id=? OR r.speaker_name LIKE ? ESCAPE '\\')"
+                )
+                params.extend([sender, "%" + _escape_like(sender) + "%"])
+            for field, op in (("since", ">="), ("until", "<")):
+                if filters.get(field):
+                    conditions.append(f"r.created_at {op} ?")
+                    params.append(filters[field])
+            table = "raw_turns"
+            ordering = "created_at DESC,id DESC"
+        else:
+            select, table = "r.*", "memories"
+            ordering = "updated_at DESC,id DESC"
+            if query:
+                conditions.append(
+                    "(r.content LIKE ? ESCAPE '\\' OR r.tags LIKE ? ESCAPE '\\')"
+                )
+                params.extend([pattern, pattern])
+            if source in {"native", "forwarded"}:
+                conditions.append(
+                    "COALESCE(r.source_type,'native') "
+                    + ("=" if source == "forwarded" else "!=")
+                    + " 'forwarded'"
+                )
+            if filters.get("memory_type") in {"semantic", "insight"}:
+                conditions.append("r.memory_type=?")
+                params.append(filters["memory_type"])
+            if filters.get("importance"):
+                conditions.append("r.importance=?")
+                params.append(filters["importance"])
+            if filters.get("sort") == "importance":
+                ordering = "importance DESC,updated_at DESC,id DESC"
+        sql = f"SELECT {select} FROM {table} r WHERE {' AND '.join(conditions)}"
+        if kind == "raw" and filters.get("status"):
+            sql = f"SELECT * FROM ({sql}) WHERE processing_status=?"
+            params.append(filters["status"])
+        cursor = await self.connection.execute(f"SELECT COUNT(*) FROM ({sql})", params)
+        total = (await cursor.fetchone())[0]
+        page_size = min(100, max(1, page_size))
+        page = max(1, min(page, (total + page_size - 1) // page_size))
+        cursor = await self.connection.execute(
+            f"{sql} ORDER BY {ordering} LIMIT ? OFFSET ?",
+            (*params, page_size, (page - 1) * page_size),
+        )
+        return {
+            "items": [dict(row) for row in await cursor.fetchall()],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+
+    @serialized
+    async def get_raw_event(self, turn_id, scope_type, scope_key):
+        """Resolve a root or source chunk into its complete bounded event.
+
+        Args:
+            turn_id: Root or child identifier.
+            scope_type: Authorized conversation type.
+            scope_key: Authorized conversation identifier.
+
+        Returns:
+            Root, numerically ordered chunks and selected source ID, or None.
+        """
+        cursor = await self.connection.execute(
+            "SELECT * FROM raw_turns WHERE id=? AND scope_type=? AND scope_key=?",
+            (turn_id, scope_type, scope_key),
+        )
+        selected = await cursor.fetchone()
+        if selected is None:
+            return None
+        root_id = selected["parent_id"] or selected["id"]
+        cursor = await self.connection.execute(
+            "SELECT * FROM raw_turns WHERE id=? AND scope_type=? AND scope_key=?",
+            (root_id, scope_type, scope_key),
+        )
+        root = await cursor.fetchone()
+        if root is None:
+            return None
+        cursor = await self.connection.execute(
+            "SELECT * FROM raw_turns WHERE parent_id=? AND scope_type=? AND scope_key=? ORDER BY id",
+            (root_id, scope_type, scope_key),
+        )
+        chunks = [dict(row) for row in await cursor.fetchall()]
+        # Parsing budgets bound event size; sort numeric paths, including retry inserts.
+        for row in chunks:
+            meta = json.loads(row["source_meta"])
+            path = meta.get("path", "")
+            row["node_path"] = path
+            row["_order"] = tuple(
+                int(x) if x.isdecimal() else 1000000 for x in path.split(".")
+            ) + (int(meta.get("chunk", "0:0").rsplit(":", 1)[-1]),)
+        chunks.sort(key=lambda row: row.pop("_order"))
+        return {"root": dict(root), "items": chunks, "selected_id": turn_id}
+
+    @serialized
+    async def edit_memory(
+        self, memory_id, scope_type, scope_key, content, tags, importance, revision
+    ):
+        """Apply an optimistic manual edit without changing source or ownership.
+
+        Args:
+            memory_id: Selected memory identifier.
+            scope_type: Authorized conversation type.
+            scope_key: Authorized conversation identifier.
+            content: Validated replacement text.
+            tags: Validated comma-separated tags.
+            importance: Importance from one to five.
+            revision: Content revision seen by the editor.
+
+        Returns:
+            Whether the unchanged revision was edited.
+        """
+        cursor = await self.connection.execute(
+            "UPDATE memories SET content=?,tags=?,importance=?,manually_edited_at=?,updated_at=?,edit_revision=edit_revision+1 WHERE id=? AND scope_type=? AND scope_key=? AND edit_revision=?",
+            (
+                content,
+                tags,
+                importance,
+                int(time.time()),
+                int(time.time()),
+                memory_id,
+                scope_type,
+                scope_key,
+                revision,
+            ),
+        )
+        if cursor.rowcount != 1:
+            return False
+        await self.bump_revision(scope_type, scope_key)
+        return True
+
+    @serialized
+    async def delete_records(self, kind, ids, scope_type, scope_key):
+        """Delete a bounded selection atomically, rejecting any foreign ID.
+
+        Args:
+            kind: Either memories or raw.
+            ids: Unique record identifiers, at most one hundred.
+            scope_type: Authorized conversation type.
+            scope_key: Authorized conversation identifier.
+
+        Returns:
+            Whether every selected record existed in this scope.
+        """
+        if kind not in {"memories", "raw"} or not ids or len(ids) > 100:
+            return False
+        table = "memories" if kind == "memories" else "raw_turns"
+        placeholders = ",".join("?" for _ in ids)
+        cursor = await self.connection.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE scope_type=? AND scope_key=? AND id IN ({placeholders})",
+            (scope_type, scope_key, *ids),
+        )
+        if (await cursor.fetchone())[0] != len(ids):
+            return False
+        await self.bump_revision(scope_type, scope_key)
+        await self.connection.execute(
+            f"DELETE FROM {table} WHERE scope_type=? AND scope_key=? AND id IN ({placeholders})",
+            (scope_type, scope_key, *ids),
+        )
+        return True
 
     @serialized
     async def get_revision(self, scope_type: str, scope_key: str) -> int:
@@ -500,7 +712,7 @@ class MemoryStore:
         )
         oldest = (await cursor.fetchone())[0]
         cursor = await self.connection.execute(
-            "SELECT id,kind,status,error,attempts,created_at,updated_at,raw_ids,payload FROM work_items WHERE scope_type=? AND scope_key=? AND status='failed' ORDER BY id DESC LIMIT 30",
+            "SELECT id,kind,status,error,attempts,created_at,updated_at,raw_ids,payload FROM work_items WHERE scope_type=? AND scope_key=? AND status='failed' ORDER BY id DESC LIMIT 100",
             (scope_type, scope_key),
         )
         failures = [dict(row) for row in await cursor.fetchall()]
@@ -515,7 +727,16 @@ class MemoryStore:
                 and bool(ids)
                 and (await cursor.fetchone())[0] == len(ids)
             )
+        cursor = await self.connection.execute(
+            "SELECT id,kind,status,error,attempts,created_at,updated_at,raw_id FROM work_items WHERE scope_type=? AND scope_key=? ORDER BY id DESC LIMIT 100",
+            (scope_type, scope_key),
+        )
+        jobs = [dict(row) for row in await cursor.fetchall()]
+        retryable = {item["id"]: item["retryable"] for item in failures}
+        for job in jobs:
+            job["retryable"] = retryable.get(job["id"], False)
         return {
+            "items": jobs,
             "counts": counts,
             "oldest_pending_seconds": max(0, int(time.time()) - oldest)
             if oldest
@@ -654,7 +875,7 @@ class MemoryStore:
             DO UPDATE SET content = excluded.content, subject = excluded.subject,
                 tags = excluded.tags, importance = excluded.importance,
                 source_ref = excluded.source_ref, source_type = excluded.source_type,
-                strength = 1.0, updated_at = excluded.updated_at
+                strength = 1.0, updated_at = excluded.updated_at, edit_revision = memories.edit_revision + 1
             """,
             (
                 scope_type,
@@ -715,7 +936,12 @@ class MemoryStore:
         if self.connection is None:
             return
         now = int(time.time())
-        sets = ["content = ?", "strength = 1.0", "updated_at = ?"]
+        sets = [
+            "content = ?",
+            "strength = 1.0",
+            "updated_at = ?",
+            "edit_revision = edit_revision + 1",
+        ]
         params: list[Any] = [content, now]
         if source_ref is not None:
             sets.append("source_ref = ?")
@@ -1233,7 +1459,8 @@ class MemoryStore:
                    (SELECT COUNT(*) FROM memories m
                      WHERE m.scope_type = s.scope_type AND m.scope_key = s.scope_key) AS memory_count,
                    (SELECT COUNT(*) FROM raw_turns r
-                     WHERE r.scope_type = s.scope_type AND r.scope_key = s.scope_key) AS raw_count,
+                     WHERE r.scope_type = s.scope_type AND r.scope_key = s.scope_key AND r.parent_id IS NULL) AS raw_count,
+                   (SELECT COUNT(*) FROM raw_turns r WHERE r.scope_type=s.scope_type AND r.scope_key=s.scope_key AND r.parent_id IS NOT NULL) AS chunk_count,
                    (SELECT COUNT(DISTINCT COALESCE(r.parent_id,r.id)) FROM raw_turns r
                      WHERE r.scope_type = s.scope_type AND r.scope_key = s.scope_key
                        AND r.extracted = 0) AS pending_count

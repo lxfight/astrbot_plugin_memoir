@@ -33,7 +33,7 @@ after(async () => {
 
 beforeEach(async () => {
   errors.length = 0;
-  context = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
+  context = await browser.newContext({ viewport: { width: 1920, height: 1080 }, reducedMotion: "reduce" });
   await context.addInitScript(() => {
     const now = Math.floor(Date.now() / 1000);
     window.savedRequests = [];
@@ -44,7 +44,12 @@ beforeEach(async () => {
         window.savedRequests.push({ endpoint, payload });
         return { updated: Object.keys(payload) };
       },
-      apiGet: async (endpoint) => {
+      apiGet: async (endpoint, params = {}) => {
+        if (endpoint === "browse") {
+          const result = await window.AstrBotPluginPage.apiGet(params.kind, params);
+          return { ...result, page: params.page || 1, page_size: 20 };
+        }
+        if (endpoint === "raw/event") return { root: { id: 1, content: "原始事件", source_kind: "forward_root" }, selected_id: params.id, items: [{ id: 3, node_path: "1.2", content: "引用正文", source_meta: JSON.stringify({ name: "Alice", id: "43" }) }] };
         if (endpoint === "overview") return {
           totals: { scopes: 2, memories: 12, raw_turns: 36, pending: 8 },
           scopes: [
@@ -107,6 +112,8 @@ test("auto tracks the OS before host context and manual choices sync across tabs
 
 test("provider select and global save use global fields, not scope overrides", async () => {
   await page.locator('[data-tab="settings"]').click();
+  assert.equal(await page.locator("#scope-recall_top_k").inputValue(), "2");
+  await page.locator('[data-view="global"]').click();
   await page.locator("#global-background_llm_provider").selectOption("audio-model");
   await page.locator("#global-recall_top_k").fill("11");
   await page.locator("#save-global-cfg").click();
@@ -114,7 +121,7 @@ test("provider select and global save use global fields, not scope overrides", a
   assert.equal(request.endpoint, "config/update");
   assert.equal(request.payload.background_llm_provider, "audio-model");
   assert.equal(request.payload.recall_top_k, 11);
-  assert.equal(await page.locator("#scope-recall_top_k").inputValue(), "2");
+  assert.equal(await page.locator("#scope-recall_top_k").count(), 0);
 });
 
 test("theme remains usable when local storage is disabled", async () => {
@@ -139,13 +146,13 @@ test("light, dark and narrow layouts render without horizontal overflow", async 
     if (output) await page.screenshot({ path: path.join(output, `${theme === "浅色" ? "light" : "dark"}.png`) });
   }
   await page.locator('[data-tab="raw"]').click();
-  await page.locator(".media-description").waitFor();
+  await page.locator(".raw-event").waitFor();
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   if (output) await page.screenshot({ path: path.join(output, "raw.png") });
   await page.setViewportSize({ width: 375, height: 812 });
   for (const tab of ["memories", "raw", "settings"]) {
     await page.locator(`[data-tab="${tab}"]`).click();
-    await page.locator(tab === "settings" ? "#global-config-form" : tab === "raw" ? ".bubble" : ".mem").first().waitFor();
+    await page.locator(tab === "settings" ? "#scope-config-form" : tab === "raw" ? ".bubble" : ".mem").first().waitFor();
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${tab} overflows`);
   }
   if (output) await page.screenshot({ path: path.join(output, "mobile.png"), fullPage: true });
@@ -175,10 +182,11 @@ test("late scope responses cannot replace a newer form or change its save target
 });
 
 test("source text is escaped and retries remain bound to the displayed scope", async () => {
-  await page.locator(".memory-sources summary").first().click();
-  await page.locator(".source-content").first().getByText("Original <script>unsafe()</script> text", { exact: false }).waitFor();
-  assert.equal(await page.locator(".source-content script").count(), 0);
-  await page.locator('[data-tab="settings"]').click();
+  await page.locator("[data-sources]").first().click();
+  await page.locator("#source-body").first().getByText("Original <script>unsafe()</script> text", { exact: false }).waitFor();
+  assert.equal(await page.locator("#source-body script").count(), 0);
+  await page.locator('#detail-dialog button').filter({ hasText: "关闭" }).click();
+  await page.locator('[data-tab="processing"]').click();
   await page.locator('[data-retry-work="7"]').click();
   const saved = await page.evaluate(() => window.savedRequests.at(-1));
   assert.deepEqual(saved, { endpoint: "processing/retry", payload: { id: 7, scope_type: "private", scope_key: "test:小张" } });
@@ -196,27 +204,143 @@ test("late memory results cannot overwrite another tab", async () => {
   await page.locator('[data-tab="raw"]').click();
   await page.locator(".bubble").first().waitFor();
   await page.evaluate(async () => { window.releaseMemories(); await new Promise(requestAnimationFrame); });
-  assert.equal(await page.locator(".bubble").count(), 2);
+  assert.equal(await page.locator(".bubble").count(), 1);
 });
 
-test("forward provenance is escaped, visible on mobile, and unsupported work cannot retry", async () => {
+test("forward source trees escape content and unsupported work cannot retry", async () => {
   await page.evaluate(() => {
     const original = window.AstrBotPluginPage.apiGet;
     window.AstrBotPluginPage.apiGet = async (endpoint, params) => {
-      if (endpoint === "raw") return { total: 1, items: [{ id: 42, parent_id: 40, source_kind: "forwarded", content: "转发正文", extracted: 0, created_at: 1234, source_meta: JSON.stringify({ status: "partial", path: "1.2.3", name: "<script>unsafe()</script>", id: "43", problems: ["<img src=x onerror=unsafe()>"] }) }] };
-      if (endpoint === "processing") return { counts: [{ kind: "forward", status: "failed", count: 1 }], oldest_pending_seconds: 0, failures: [{ id: 8, kind: "forward", error: "Adapter exposes preview only", retryable: false, attempts: 1 }] };
+      if (endpoint === "raw/event") return { root: { id: 40, content: "转发事件" }, selected_id: 42, items: [{ id: 42, node_path: "1.2.3", content: "<img src=x onerror=unsafe()>", source_meta: JSON.stringify({ name: "<script>unsafe()</script>", id: "43" }) }] };
+      if (endpoint === "processing") return { counts: [{ kind: "forward", status: "failed", count: 1 }], oldest_pending_seconds: 0, items: [{ id: 8, kind: "forward", status: "failed", error: "Adapter exposes preview only", retryable: false, attempts: 1 }] };
       return original(endpoint, params);
     };
   });
   await page.locator('[data-tab="raw"]').click();
-  await page.getByText("转发引用 · 部分解析 · 来源 #40").waitFor();
-  await page.getByText("来源详情", { exact: true }).click();
-  await page.getByText("节点 1.2.3", { exact: false }).waitFor();
-  assert.equal(await page.locator(".chat script, .chat img").count(), 0);
+  await page.locator('[data-open-event]').first().click();
+  await page.locator('#source-body').getByText("节点 1.2.3", { exact: true }).waitFor();
+  assert.equal(await page.locator("#source-body script, #source-body img").count(), 0);
   await page.setViewportSize({ width: 375, height: 812 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   if (process.env.MEMOIR_SCREENSHOT_DIR) await page.screenshot({ path: path.join(process.env.MEMOIR_SCREENSHOT_DIR, "forward-mobile.png"), fullPage: true });
-  await page.locator('[data-tab="settings"]').click();
+  await page.locator('#detail-dialog button').filter({ hasText: "关闭" }).click();
+  await page.locator('[data-tab="processing"]').click();
   await page.getByText("转发解析 #8", { exact: true }).waitFor();
   assert.equal(await page.locator('[data-retry-work="8"]').isDisabled(), true);
+});
+
+test("dirty settings block navigation until explicitly discarded", async () => {
+  await page.locator('[data-tab="settings"]').click();
+  await page.locator('#scope-recall_top_k').fill('7');
+  await page.getByText('有未保存修改', { exact: true }).waitFor();
+  await page.locator('[data-tab="raw"]').click();
+  await page.locator('#confirm-dialog').waitFor({ state: 'visible' });
+  await page.locator('#confirm-dialog button[value="cancel"]').click();
+  assert.equal(await page.locator('#scope-recall_top_k').inputValue(), '7');
+  await page.locator('[data-view="global"]').click();
+  await page.locator('#confirm-dialog button[value="accept"]').click();
+  await page.locator('#global-config-form').waitFor();
+  assert.equal((await page.evaluate(() => window.savedRequests)).length, 0);
+});
+
+test("manual edits submit only editable fields and keep failed edits open", async () => {
+  await page.evaluate(() => {
+    const original = window.AstrBotPluginPage.apiPost;
+    window.rejectEdit = true;
+    window.AstrBotPluginPage.apiPost = async (endpoint, payload) => {
+      if (endpoint === 'memories/update' && window.rejectEdit) throw new Error('记忆已变化，请刷新');
+      return original(endpoint, payload);
+    };
+  });
+  await page.locator('[data-edit-memory="1"]').click();
+  await page.locator('#edit-content').fill('人工修改正文');
+  await page.locator('#editor-dialog button[type="submit"]').click();
+  await page.locator('.toast.err').waitFor();
+  assert.equal(await page.locator('#editor-dialog').isVisible(), true);
+  assert.equal(await page.locator('#edit-content').inputValue(), '人工修改正文');
+  await page.evaluate(() => { window.rejectEdit = false; });
+  await page.locator('#editor-dialog button[type="submit"]').click();
+  await page.locator('#editor-dialog').waitFor({ state: 'hidden' });
+  const saved = await page.evaluate(() => window.savedRequests.at(-1));
+  assert.deepEqual(Object.keys(saved.payload).sort(), ['content','id','importance','revision','scope_key','scope_type','tags']);
+  assert.equal(saved.payload.scope_key, 'test:小张');
+  assert.equal(saved.payload.content, '人工修改正文');
+});
+
+test("batch deletion requires confirmation and sends only selected page IDs", async () => {
+  await page.locator('#toggle-selection').click();
+  await page.locator('#select-page').check();
+  await page.locator('#delete-selection').click();
+  await page.locator('#confirm-dialog button[value="cancel"]').click();
+  assert.equal((await page.evaluate(() => window.savedRequests)).length, 0);
+  await page.locator('[data-select="2"]').uncheck();
+  await page.locator('#delete-selection').click();
+  await page.locator('#confirm-dialog button[value="accept"]').click();
+  await page.waitForFunction(() => window.savedRequests.length === 1);
+  const saved = await page.evaluate(() => window.savedRequests[0]);
+  assert.deepEqual(saved, { endpoint: 'records/delete', payload: { scope_type: 'private', scope_key: 'test:小张', kind: 'memories', ids: [1,3] } });
+});
+
+test("raw filters and search paginate server-side and discard stale search responses", async () => {
+  await page.evaluate(() => {
+    const original = window.AstrBotPluginPage.apiGet;
+    window.browseRequests = [];
+    window.AstrBotPluginPage.apiGet = async (endpoint, params) => {
+      if (endpoint !== 'browse') return original(endpoint, params);
+      window.browseRequests.push(params);
+      if (params.q === '旧搜索') return new Promise(resolve => { window.releaseOldSearch = () => resolve({ items: [{ id: 99, content: '过时结果', created_at: 1234 }], total: 1, page: 1 }); });
+      return { items: [{ id: 30, content: params.q || '新结果', created_at: 1234 }], total: 45, page: params.page, page_size: 20 };
+    };
+  });
+  await page.locator('[data-tab="raw"]').click();
+  await page.locator('#search').fill('旧搜索');
+  await page.waitForFunction(() => typeof window.releaseOldSearch === 'function');
+  await page.locator('#search').fill('新搜索');
+  await page.locator('.bubble').getByText('新搜索', { exact: true }).waitFor();
+  await page.evaluate(() => window.releaseOldSearch());
+  assert.equal(await page.getByText('过时结果', { exact: true }).count(), 0);
+  await page.locator('[data-filter="source"]').selectOption('forwarded');
+  await page.locator('[data-filter="since"]').fill('2026-09-01');
+  await page.locator('[data-filter="since"]').dispatchEvent('change');
+  await page.locator('#next').click();
+  await page.waitForFunction(() => window.browseRequests.at(-1).page === 2);
+  const query = await page.evaluate(() => window.browseRequests.at(-1));
+  assert.equal(query.kind, 'raw'); assert.equal(query.q, '新搜索'); assert.equal(query.source, 'forwarded'); assert.equal(typeof query.since, 'number');
+});
+
+test("global settings remain accessible without scopes and mobile drawer closes after selection", async () => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  assert.equal(await page.locator('#scope-sidebar').isVisible(), false);
+  await page.locator('#scope-toggle').click();
+  await page.locator('[data-scope="group|test:周末摄影小组"]').click();
+  await page.waitForFunction(() => document.getElementById('mobile-title').textContent.includes('周末摄影小组'));
+  assert.equal(await page.locator('#scope-toggle').getAttribute('aria-expanded'), 'false');
+  await page.evaluate(() => {
+    const original = window.AstrBotPluginPage.apiGet;
+    window.AstrBotPluginPage.apiGet = (endpoint, params) => endpoint === 'overview' ? Promise.resolve({ scopes: [], totals: { scopes: 0, memories: 0, raw_turns: 0, pending: 0 } }) : original(endpoint, params);
+  });
+  await page.locator('#scope-toggle').click();
+  await page.locator('#refresh').click();
+  await page.getByText('还没有会话', { exact: true }).waitFor();
+  await page.locator('[data-view="global"]').click();
+  await page.locator('#global-config-form').waitFor();
+  assert.equal(await page.locator('#scope-sidebar').isVisible(), false);
+});
+
+test("task polling stops on navigation and late task responses cannot replace the page", async () => {
+  await page.evaluate(() => {
+    const original = window.AstrBotPluginPage.apiGet;
+    window.processingCalls = 0;
+    window.AstrBotPluginPage.apiGet = async (endpoint, params) => {
+      if (endpoint !== 'processing') return original(endpoint, params);
+      window.processingCalls++;
+      return { counts: [{ kind: 'forward', status: 'running', count: 1 }], items: [], oldest_pending_seconds: 0 };
+    };
+  });
+  await page.locator('[data-tab="processing"]').click();
+  await page.waitForFunction(() => window.processingCalls === 1);
+  await page.locator('[data-tab="memories"]').click();
+  await page.locator('.mem').first().waitFor();
+  await page.waitForTimeout(5200);
+  assert.equal(await page.evaluate(() => window.processingCalls), 1);
 });

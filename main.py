@@ -61,6 +61,16 @@ class MemoirPlugin(Star):
         """
         api = WebApi(self)
         prefix = f"/{_PLUGIN_NAME}"
+        for path, handler, method, description in (
+            ("browse", api.browse, "GET", "Browse filtered records"),
+            ("raw/event", api.raw_event, "GET", "Read complete source event"),
+            ("memories/update", api.edit_memory, "POST", "Edit memory text"),
+            ("records/delete", api.delete_records, "POST", "Delete selected records"),
+        ):
+            self.context.register_web_api(
+                f"{prefix}/{path}", handler, [method], description
+            )
+
         self.context.register_web_api(
             f"{prefix}/overview", api.overview, ["GET"], "Memory overview"
         )

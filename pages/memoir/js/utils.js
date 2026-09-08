@@ -77,3 +77,9 @@ export function renderPager(total, pageSize) {
   $("prev").disabled = state.page <= 1;
   $("next").disabled = state.page >= pages;
 }
+
+export function longText(text) {
+  const value = String(text || "");
+  const formatted = esc(value).replace(/\[(图片|语音|文件|视频|表情|多媒体解析)(?:x(\d+))?\]/g, (_, kind, n) => `<span class="placeholder-chip${kind === "多媒体解析" ? " media-description" : ""}">[${kind}${n ? `x${n}` : ""}]</span>`);
+  return value.length > 360 ? `<details class="long-text"><summary>${esc(value.slice(0, 180))}… <span>展开全文</span></summary><p>${formatted}</p></details>` : `<p class="record-text">${formatted}</p>`;
+}

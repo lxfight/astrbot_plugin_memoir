@@ -12,6 +12,12 @@ export const state = {
   page: 1,
   pageSize: 20,
   q: "",
+  filters: {},
+  items: [],
+  selected: new Set(),
+  selecting: false,
+  busy: false,
+  views: new Map(),
   scopeFilter: "",
   globalConfig: {},
   providers: [],
@@ -26,3 +32,5 @@ export function beginLoad() {
   const scope = { ...state.scope };
   return { scope, current: () => version === state.loadVersion };
 }
+
+export const sameScope = (a, b) => Boolean(a && b && a.scope_type === b.scope_type && a.scope_key === b.scope_key);

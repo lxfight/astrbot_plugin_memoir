@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from astrbot.api.web import error_response, json_response, request
 
 from .memory_recall import extract_terms
+from .scope import merge_scope_config
 from .storage import MemoryStore
 
 if TYPE_CHECKING:
@@ -164,6 +165,102 @@ class WebApi:
             return None
         return plugin.store, plugin.config
 
+    async def browse(self):
+        """Return filtered, paginated memories or grouped raw events."""
+        ctx, scope = self._ctx(), self._require_scope()
+        if ctx is None or scope is None:
+            return error_response("plugin or scope unavailable")
+        kind = request.query.get("kind", "memories")
+        if kind not in {"memories", "raw"}:
+            return error_response("invalid record kind")
+        filters = {
+            k: request.query.get(k, "")
+            for k in ("q", "source", "memory_type", "sender", "status", "sort")
+        }
+        for key in ("since", "until", "importance"):
+            filters[key] = request.query.get(key, 0, type=int)
+        return json_response(
+            await ctx[0].browse_records(
+                *scope,
+                kind,
+                filters,
+                request.query.get("page", 1, type=int),
+                request.query.get("page_size", 20, type=int),
+            )
+        )
+
+    async def raw_event(self):
+        """Return a source event only within the selected conversation."""
+        ctx, scope = self._ctx(), self._require_scope()
+        if ctx is None or scope is None:
+            return error_response("plugin or scope unavailable")
+        result = await ctx[0].get_raw_event(
+            request.query.get("id", 0, type=int), *scope
+        )
+        return (
+            json_response(result)
+            if result
+            else error_response("来源已删除或不属于当前会话")
+        )
+
+    async def edit_memory(self):
+        """Validate manual edits and reject stale or foreign records."""
+        ctx = self._ctx()
+        payload = await request.json(default={})
+        if ctx is None or not isinstance(payload, dict):
+            return error_response("invalid request")
+        scope = self._scope_from_payload(payload)
+        content, tags = payload.get("content"), payload.get("tags", "")
+        if (
+            scope is None
+            or type(payload.get("id")) is not int
+            or type(payload.get("revision")) is not int
+            or not isinstance(content, str)
+            or not 1 <= len(content.strip()) <= 4000
+            or not isinstance(tags, str)
+            or len(tags) > 200
+            or type(payload.get("importance")) is not int
+            or not 1 <= payload["importance"] <= 5
+        ):
+            return error_response(
+                "正文须为 1–4000 字符，标签最多 200 字符，重要度为 1–5"
+            )
+        updated = await ctx[0].edit_memory(
+            payload["id"],
+            *scope,
+            content.strip(),
+            tags.strip(),
+            payload["importance"],
+            payload["revision"],
+        )
+        return (
+            json_response({"updated": payload["id"]})
+            if updated
+            else error_response("记忆已变化或删除，请关闭编辑窗口、刷新后重新编辑")
+        )
+
+    async def delete_records(self):
+        """Delete a scoped selection only after validating every record ID."""
+        ctx = self._ctx()
+        payload = await request.json(default={})
+        if ctx is None or not isinstance(payload, dict):
+            return error_response("invalid request")
+        scope, ids = self._scope_from_payload(payload), payload.get("ids")
+        if (
+            scope is None
+            or not isinstance(ids, list)
+            or not 1 <= len(ids) <= 100
+            or any(type(i) is not int or i <= 0 for i in ids)
+        ):
+            return error_response("请选择当前页的有效记录（最多 100 条）")
+        ids = list(set(ids))
+        deleted = await ctx[0].delete_records(payload.get("kind"), ids, *scope)
+        return (
+            json_response({"deleted": len(ids)})
+            if deleted
+            else error_response("选中记录已变化或不属于当前会话，请刷新后重试")
+        )
+
     async def processing_status(self):
         """Return scoped queue counts, backlog age and retryable failures."""
         ctx, scope = self._ctx(), self._require_scope()
@@ -222,6 +319,13 @@ class WebApi:
             return error_response("plugin is not available")
         store, config = ctx
         scopes = await store.list_scopes()
+        overrides = await store.get_all_scope_configs()
+        for scope in scopes:
+            override = overrides.get((scope["scope_type"], scope["scope_key"]), {})
+            scope["enabled"] = config.get(
+                f"enable_{scope['scope_type']}_memory", True
+            ) and override.get("enabled", True)
+            scope["custom"] = bool(override)
         return json_response(
             {
                 "scopes": scopes,
@@ -229,6 +333,7 @@ class WebApi:
                     "scopes": len(scopes),
                     "memories": sum(s["memory_count"] for s in scopes),
                     "raw_turns": sum(s["raw_count"] for s in scopes),
+                    "chunks": sum(s["chunk_count"] for s in scopes),
                     "pending": sum(s["pending_count"] for s in scopes),
                 },
                 "config": {
@@ -439,12 +544,24 @@ class WebApi:
         ctx = self._ctx()
         if ctx is None:
             return error_response("plugin is not available")
-        store, _ = ctx
+        store, config = ctx
         scope = self._require_scope()
         if scope is None:
             return error_response("scope_type and scope_key are required")
         override = await store.get_scope_config(scope[0], scope[1])
-        return json_response({"override": override})
+        base = {**GLOBAL_DEFAULTS, **config}
+        merged = merge_scope_config(base, override, scope[0])
+        effective = {k: merged.get(k) for k in SCOPE_CONFIG_KEYS}
+        effective.update(
+            enabled=base[f"enable_{scope[0]}_memory"]
+            and merged.get("scope_enabled", True),
+            bridge_enabled=base["enable_cross_scope_bridge"]
+            and merged.get("scope_bridge_enabled", True),
+            consolidation_count_threshold=merged[
+                f"consolidation_count_threshold_{scope[0]}"
+            ],
+        )
+        return json_response({"override": override, "effective": effective})
 
     async def update_scope_config(self):
         """更新会话配置覆盖；payload 的 override 为空对象时清除覆盖（完全继承全局）"""

@@ -18,14 +18,15 @@
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <canvas id="fx" aria-hidden="true"></canvas>
+    <button id="scope-backdrop" class="scope-backdrop" aria-label="关闭会话列表" hidden></button>
+    <header class="mobile-bar"><button class="icon-btn" id="scope-toggle" aria-expanded="false" aria-controls="scope-sidebar" aria-label="切换会话"><i data-lucide="panel-left"></i></button><strong id="mobile-title">记忆管理</strong></header>
     <div class="app">
-      <aside class="sidebar">
+      <aside class="sidebar" id="scope-sidebar" aria-label="会话导航">
         <div class="brand">
-          <i data-lucide="brain-circuit" class="brand-icon"></i>
+          <img class="brand-logo" src="./logo.png" alt="Memoir 记忆小仓鼠">
           <div>
             <h1>记忆管理</h1>
-            <p class="sub">捕获 → 巩固 → 遗忘 → 召回</p>
+            <p class="sub">留住值得记得的对话</p>
           </div>
         </div>
 
@@ -40,6 +41,7 @@
 
         <div class="scope-list" id="scope-list"></div>
 
+        <nav class="global-nav" aria-label="全局管理"><button class="btn" data-view="global"><i data-lucide="globe"></i>全局设置</button><button class="btn" data-view="consents"><i data-lucide="shield-check"></i>桥接授权</button></nav>
         <div class="appearance">
           <div class="appearance-head"><span id="theme-label">外观</span><span id="theme-status" aria-live="polite"></span></div>
           <div class="theme-picker" role="group" aria-labelledby="theme-label">
@@ -60,7 +62,8 @@
           <div class="tab-group">
             <button class="tab active" data-tab="memories" aria-pressed="true"><i data-lucide="brain"></i>记忆</button>
             <button class="tab" data-tab="raw" aria-pressed="false"><i data-lucide="messages-square"></i>原文对话</button>
-            <button class="tab" data-tab="settings" aria-pressed="false"><i data-lucide="settings-2"></i>会话配置</button>
+            <button class="tab" data-tab="processing" aria-pressed="false"><i data-lucide="activity"></i>处理任务</button>
+            <button class="tab" data-tab="settings" aria-pressed="false"><i data-lucide="settings-2"></i>会话设置</button>
           </div>
           <div class="spacer"></div>
           <div class="search-wrap tab-search" id="search-wrap">
@@ -68,6 +71,8 @@
             <input type="search" id="search" placeholder="搜索当前会话记忆" aria-label="搜索当前会话记忆" />
           </div>
         </div>
+        <div class="filter-bar" id="filters"></div>
+        <div class="selection-bar" id="selection-bar" hidden></div>
         <div class="content" id="content"></div>
         <div class="pager" id="pager" style="display: none">
           <button class="icon-btn" id="prev" aria-label="上一页"><i data-lucide="chevron-left"></i></button>
@@ -79,6 +84,9 @@
 
     <div class="toast" id="toast" role="status"></div>
 
+    <dialog id="confirm-dialog" class="modal"></dialog>
+    <dialog id="detail-dialog" class="modal detail-modal"></dialog>
+    <dialog id="editor-dialog" class="modal"></dialog>
     <script type="module" src="./js/main.js"></script>
   </body>
 </html>
