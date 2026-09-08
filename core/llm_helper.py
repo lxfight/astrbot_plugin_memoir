@@ -23,7 +23,12 @@ _FALLBACK_WARNED = False
 
 
 async def describe_multimedia(
-    context, config: dict, event: AstrMessageEvent, *, problems: list[str] | None = None
+    context,
+    config: dict,
+    event: AstrMessageEvent,
+    *,
+    problems: list[str] | None = None,
+    report_unsupported: bool = False,
 ) -> str:
     """Describe supported incoming media for later consolidation and retrieval.
 
@@ -32,6 +37,7 @@ async def describe_multimedia(
         config: Effective memory configuration for this conversation.
         event: Incoming message containing images or audio.
         problems: Optional destination for bounded operational failure reasons.
+        report_unsupported: Report skipped modalities for forwarding completeness.
 
     Returns:
         A bounded, single-line description, or an empty string when unsupported
@@ -56,6 +62,8 @@ async def describe_multimedia(
         modalities = provider.provider_config.get("modalities")
         # Missing capabilities are unknown, so do not send media speculatively.
         if not isinstance(modalities, list):
+            if report_unsupported:
+                issues.append("Unsupported media: model capabilities are unknown")
             return ""
         media: dict[str, list[str]] = {}
         labels = []
@@ -69,6 +77,10 @@ async def describe_multimedia(
             elif isinstance(part, Record) and "audio" in modalities:
                 key, label = "audio_urls", "语音"
             else:
+                if report_unsupported and isinstance(part, (Image, Record)):
+                    issues.append(
+                        f"Unsupported media: attachment {index} requires a different model capability"
+                    )
                 continue
             try:
                 path = await asyncio.wait_for(part.convert_to_file_path(), timeout=10)

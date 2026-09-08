@@ -35,11 +35,17 @@ function bubbleText(text) {
 function rawTurnHtml(r, prevDay, i) {
   const day = new Date((r.created_at || 0) * 1000).toDateString();
   const chip = day !== prevDay ? `<div class="day-chip"${stagger(i, 20)}>${esc(dayLabel(r.created_at || 0))}</div>` : "";
+  let origin = {};
+  try { origin = JSON.parse(r.source_meta || "{}"); } catch { /* Old rows have no provenance. */ }
+  const statusNames = { pending: "解析排队", complete: "解析完成", partial: "部分解析", unsupported: "暂不支持", failed: "解析失败" };
+  const source = r.source_kind && r.source_kind !== "native"
+    ? `<span class="pending-pill">转发引用 · ${esc(statusNames[origin.status] || origin.status || "")}${r.parent_id ? ` · 来源 #${Number(r.parent_id)}` : ""}</span><details><summary>来源详情</summary><p>${esc(origin.path ? `节点 ${origin.path} · 署名 ${origin.name || "未知"} (${origin.id || "未知"}) · 原时间 ${origin.time || "未知"} · 身份未验证` : "引用内容不代表转发者本人陈述")}</p>${(origin.problems || []).map(p => `<p>${esc(p)}</p>`).join("")}</details>`
+    : "";
   const pending = r.extracted === -1 ? `<span class="pending-pill">巩固失败</span>` : r.extracted ? "" : `<span class="pending-pill">待巩固</span>`;
   const speaker = r.speaker_name
     ? `<span class="speaker" style="--speaker-hue:${speakerHue(r.speaker_name)}">${esc(r.speaker_name)}</span> ·`
     : "";
-  const head = `<div class="msg-head">${speaker}<span>${fmtTime(r.created_at)}</span><span>#${r.id}</span>${pending}<button class="del" data-del-raw="${r.id}" title="删除这轮"><i data-lucide="trash-2"></i></button></div>`;
+  const head = `<div class="msg-head">${speaker}<span>${fmtTime(r.created_at)}</span><span>#${r.id}</span>${pending}${source}<button class="del" data-del-raw="${r.id}" title="删除这轮"><i data-lucide="trash-2"></i></button></div>`;
   const parts = parseTurn(r.content);
   const rows = parts
     .map((p, k) => {

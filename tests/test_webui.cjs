@@ -198,3 +198,25 @@ test("late memory results cannot overwrite another tab", async () => {
   await page.evaluate(async () => { window.releaseMemories(); await new Promise(requestAnimationFrame); });
   assert.equal(await page.locator(".bubble").count(), 2);
 });
+
+test("forward provenance is escaped, visible on mobile, and unsupported work cannot retry", async () => {
+  await page.evaluate(() => {
+    const original = window.AstrBotPluginPage.apiGet;
+    window.AstrBotPluginPage.apiGet = async (endpoint, params) => {
+      if (endpoint === "raw") return { total: 1, items: [{ id: 42, parent_id: 40, source_kind: "forwarded", content: "转发正文", extracted: 0, created_at: 1234, source_meta: JSON.stringify({ status: "partial", path: "1.2.3", name: "<script>unsafe()</script>", id: "43", problems: ["<img src=x onerror=unsafe()>"] }) }] };
+      if (endpoint === "processing") return { counts: [{ kind: "forward", status: "failed", count: 1 }], oldest_pending_seconds: 0, failures: [{ id: 8, kind: "forward", error: "Adapter exposes preview only", retryable: false, attempts: 1 }] };
+      return original(endpoint, params);
+    };
+  });
+  await page.locator('[data-tab="raw"]').click();
+  await page.getByText("转发引用 · 部分解析 · 来源 #40").waitFor();
+  await page.getByText("来源详情", { exact: true }).click();
+  await page.getByText("节点 1.2.3", { exact: false }).waitFor();
+  assert.equal(await page.locator(".chat script, .chat img").count(), 0);
+  await page.setViewportSize({ width: 375, height: 812 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  if (process.env.MEMOIR_SCREENSHOT_DIR) await page.screenshot({ path: path.join(process.env.MEMOIR_SCREENSHOT_DIR, "forward-mobile.png"), fullPage: true });
+  await page.locator('[data-tab="settings"]').click();
+  await page.getByText("转发解析 #8", { exact: true }).waitFor();
+  assert.equal(await page.locator('[data-retry-work="8"]').isDisabled(), true);
+});

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from astrbot.api import logger
 from astrbot.api.message_components import Image, Record
 
+from .forward_parser import ForwardExpander, snapshot_forward
 from .llm_helper import describe_multimedia
 from .scope import merge_scope_config
 
@@ -33,7 +34,7 @@ class MediaProcessor:
         self.tasks.clear()
         async with self.store.transaction():
             await self.store.connection.execute(
-                "UPDATE work_items SET status='pending' WHERE kind='media' AND status='running'"
+                "UPDATE work_items SET status='pending' WHERE kind IN ('media','forward') AND status='running'"
             )
 
     async def enqueue(self, event, scope, raw_id, user_text, assistant_text=""):
@@ -46,6 +47,51 @@ class MediaProcessor:
             user_text: Original text with media markers.
             assistant_text: Assistant response for private turns.
         """
+        forward = snapshot_forward(event)
+        if forward:
+            forward.update(
+                umo=event.unified_msg_origin,
+                revision=await self.store.get_revision(
+                    scope.scope_type, scope.scope_key
+                ),
+            )
+            await self.store.connection.execute(
+                "UPDATE raw_turns SET source_kind='forward_root',extracted=1,source_meta=? WHERE id=?",
+                (
+                    json.dumps(
+                        {
+                            "status": "pending",
+                            "platform": forward["platform"],
+                            "platform_id": forward["platform_id"],
+                            "event_id": forward["event_id"],
+                        }
+                    ),
+                    raw_id,
+                ),
+            )
+            job_id = await self.store.record_work(
+                "forward", scope.scope_type, scope.scope_key, [raw_id], payload=forward
+            )
+            cursor = await self.store.connection.execute(
+                "SELECT status,error FROM work_items WHERE id=?", (job_id,)
+            )
+            queued = await cursor.fetchone()
+            if queued["status"] == "failed":
+                await self.store.connection.execute(
+                    "UPDATE raw_turns SET source_meta=? WHERE id=?",
+                    (
+                        json.dumps(
+                            {
+                                "status": "failed",
+                                "problems": [queued["error"]],
+                                "retryable": True,
+                            }
+                        ),
+                        raw_id,
+                    ),
+                )
+            self.wakeup.set()
+            return
         parts = [
             p for p in event.message_obj.message or [] if isinstance(p, (Image, Record))
         ]
@@ -97,10 +143,10 @@ class MediaProcessor:
         store = self.store
         async with store.transaction():
             await store.connection.execute(
-                "DELETE FROM work_items WHERE kind='media' AND NOT EXISTS(SELECT 1 FROM raw_turns WHERE id=work_items.raw_id)"
+                "DELETE FROM work_items WHERE kind IN ('media','forward') AND NOT EXISTS(SELECT 1 FROM raw_turns WHERE id=work_items.raw_id)"
             )
             cursor = await store.connection.execute(
-                "SELECT * FROM work_items WHERE kind='media' AND status='pending' ORDER BY id LIMIT 1"
+                "SELECT * FROM work_items WHERE kind IN ('media','forward') AND status='pending' ORDER BY id LIMIT 1"
             )
             row = await cursor.fetchone()
             if not row:
@@ -119,6 +165,11 @@ class MediaProcessor:
                 "UPDATE work_items SET status='running',attempts=attempts+1,updated_at=? WHERE id=?",
                 (int(time.time()), job["id"]),
             )
+        if job["kind"] == "forward":
+            await self._process_forward(
+                job, payload, effective, revision, config_revision
+            )
+            return True
         problems = []
         description = ""
         if (
@@ -204,6 +255,185 @@ class MediaProcessor:
                 ),
             )
         return True
+
+    async def _process_forward(
+        self, job, payload, effective, revision, config_revision
+    ):
+        """Expand quoted material outside transactions and atomically save chunks.
+
+        Args:
+            job: Claimed durable job.
+            payload: Bounded adapter snapshot.
+            effective: Effective scope settings at claim time.
+            revision: Scope revision at claim time.
+            config_revision: Global settings revision at claim time.
+        """
+        store = self.store
+        scope_type, scope_key = job["scope_type"], job["scope_key"]
+        result = ForwardExpander(self.context, payload)
+        if (
+            revision != payload["revision"]
+            or not effective.get("scope_enabled", True)
+            or not effective.get(f"enable_{scope_type}_memory", True)
+        ):
+            result.problems.append(
+                "Conversation settings changed or memory is disabled"
+            )
+            result.retryable = True
+        else:
+            await result.expand()
+            if result.parts:
+                issues = []
+                try:
+                    parts = [
+                        (Image if p["kind"] == "image" else Record)(
+                            **{k: p[k] for k in ("file", "url", "path") if k in p}
+                        )
+                        for p in result.parts
+                    ]
+                    mapping = " / ".join(
+                        f"媒体段{i}: 转发节点{p['node_path']}"
+                        for i, p in enumerate(result.parts, 1)
+                    )
+                    event = SimpleNamespace(
+                        message_obj=SimpleNamespace(message=parts),
+                        message_str=mapping,
+                        unified_msg_origin=payload["umo"],
+                    )
+                    description = await asyncio.wait_for(
+                        describe_multimedia(
+                            self.context,
+                            effective,
+                            event,
+                            problems=issues,
+                            report_unsupported=True,
+                        ),
+                        45,
+                    )
+                    if description:
+                        result.nodes.append(
+                            {
+                                "path": "media",
+                                "text": f"[多媒体解析] {mapping} / {description}",
+                            }
+                        )
+                    elif not issues:
+                        result.problems.append(
+                            "Selected model does not support the supplied media; placeholders retained"
+                        )
+                except Exception as exc:
+                    issues.append(
+                        f"Forward media processing failed: {type(exc).__name__}"
+                    )
+                result.problems.extend(issues)
+                result.retryable |= any(
+                    not issue.startswith("Unsupported media:") for issue in issues
+                )
+        async with store.transaction():
+            cursor = await store.connection.execute(
+                "SELECT r.* FROM raw_turns r JOIN work_items w ON w.raw_id=r.id WHERE w.id=?",
+                (job["id"],),
+            )
+            source = await cursor.fetchone()
+            if source is None:
+                return
+            if (
+                revision != await store.get_revision(scope_type, scope_key)
+                or config_revision != store.config_revision
+            ):
+                result.nodes = []
+                result.problems.append(
+                    "Settings changed during forward processing; retry"
+                )
+                result.retryable = True
+            full_text = " ".join(n["text"] for n in result.nodes)
+            if scope_type == "group" and (
+                source["speaker_id"]
+                in (effective.get("group_capture_ignored_users") or [])
+                or any(
+                    str(k).strip() in full_text
+                    for k in effective.get("group_capture_ignored_keywords") or []
+                    if str(k).strip()
+                )
+            ):
+                await store.delete_raw_turn_in_scope(
+                    source["id"], scope_type, scope_key
+                )
+                return
+            cursor = await store.connection.execute(
+                "SELECT id,source_meta FROM raw_turns WHERE parent_id=?",
+                (source["id"],),
+            )
+            previous = [dict(r) for r in await cursor.fetchall()]
+            status = (
+                "partial"
+                if result.problems and (result.nodes or previous)
+                else "failed"
+                if result.retryable
+                else "unsupported"
+                if result.problems
+                else "complete"
+            )
+            metadata = {
+                "status": status,
+                "platform": payload["platform"],
+                "platform_id": payload["platform_id"],
+                "event_id": payload.get("event_id", ""),
+                "problems": list(dict.fromkeys(result.problems))[:10],
+                "retryable": result.retryable,
+            }
+            # Stable node/chunk identity makes retries idempotent and preserves source IDs.
+            existing = {json.loads(r["source_meta"]).get("chunk") for r in previous}
+            for row in previous:
+                origin = json.loads(row["source_meta"])
+                origin["status"] = status
+                await store.connection.execute(
+                    "UPDATE raw_turns SET source_meta=? WHERE id=?",
+                    (json.dumps(origin, ensure_ascii=False), row["id"]),
+                )
+            for node in result.nodes:
+                for offset in range(0, len(node["text"]), 1500):
+                    chunk = f"{node['path']}:{offset // 1500}"
+                    if chunk in existing:
+                        continue
+                    origin = {k: v for k, v in node.items() if k != "text"}
+                    origin.update(chunk=chunk, status=status)
+                    label = f"[转发引用 #{source['id']} 节点{node['path']}，署名未验证：{node.get('name') or '?'} ({node.get('id') or '?'})，原时间：{node.get('time') or '?'}] "
+                    await store.connection.execute(
+                        "INSERT INTO raw_turns(scope_type,scope_key,content,extracted,created_at,parent_id,source_kind,source_meta) VALUES(?,?,?,0,?,?,'forwarded',?)",
+                        (
+                            scope_type,
+                            scope_key,
+                            " ".join(label.split())
+                            + " "
+                            + node["text"][offset : offset + 1500],
+                            source["created_at"],
+                            source["id"],
+                            json.dumps(origin, ensure_ascii=False),
+                        ),
+                    )
+            await store.connection.execute(
+                "UPDATE raw_turns SET content=?,source_meta=? WHERE id=?",
+                (
+                    f"[转发消息：{status}；引用内容不代表转发者本人陈述] "
+                    + "; ".join(metadata["problems"]),
+                    json.dumps(metadata, ensure_ascii=False),
+                    source["id"],
+                ),
+            )
+            payload["retryable"] = result.retryable
+            await store.connection.execute(
+                "UPDATE work_items SET status=?,error=?,payload=?,updated_at=? WHERE id=?",
+                (
+                    "failed" if result.problems else "complete",
+                    "; ".join(metadata["problems"])[:300],
+                    json.dumps(payload, ensure_ascii=False)
+                    if result.retryable
+                    else json.dumps({"retryable": False}),
+                    int(time.time()),
+                    job["id"],
+                ),
+            )
 
     async def _run(self):
         """Poll the persisted queue, waking immediately after new capture."""

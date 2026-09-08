@@ -265,9 +265,9 @@ export async function loadProcessingStatus() {
   }
   const names = { pending: "排队", running: "处理中", failed: "失败", complete: "完成" };
   box.innerHTML = `<div class="form-title"><i data-lucide="activity"></i>处理状态<button class="btn" id="refresh-processing">刷新状态</button></div>
-    <p class="form-sub">最早积压：${Math.floor(result.oldest_pending_seconds / 60)} 分钟 · 媒体队列最多 32 条，同时处理 2 条</p>
-    <div class="processing-counts">${result.counts.map((c) => `<span class="subject-chip">${c.kind === "media" ? "媒体" : "巩固"} ${esc(names[c.status] || c.status)} ${c.count}</span>`).join("") || "暂无后台任务"}</div>
-    ${result.failures.map((f) => `<div class="processing-failure"><div><strong>${f.kind === "media" ? "媒体解析" : "记忆巩固"} #${f.id}</strong><p>${esc(f.error)}</p><small>尝试 ${f.attempts} 次 · ${timeAgo(f.updated_at)}</small></div><button class="btn" data-retry-work="${f.id}" data-scope-type="${esc(scope.scope_type)}" data-scope-key="${esc(scope.scope_key)}" ${f.retryable ? "" : "disabled"}>${f.retryable ? "重试" : "来源已过期"}</button></div>`).join("")}`;
+    <p class="form-sub">最早积压：${Math.floor(result.oldest_pending_seconds / 60)} 分钟 · 媒体与转发共用队列，最多 32 条，同时处理 2 条</p>
+    <div class="processing-counts">${result.counts.map((c) => `<span class="subject-chip">${c.kind === "forward" ? "转发" : c.kind === "media" ? "媒体" : "巩固"} ${esc(names[c.status] || c.status)} ${c.count}</span>`).join("") || "暂无后台任务"}</div>
+    ${result.failures.map((f) => `<div class="processing-failure"><div><strong>${f.kind === "forward" ? "转发解析" : f.kind === "media" ? "媒体解析" : "记忆巩固"} #${f.id}</strong><p>${esc(f.error)}</p><small>尝试 ${f.attempts} 次 · ${timeAgo(f.updated_at)}</small></div><button class="btn" data-retry-work="${f.id}" data-scope-type="${esc(scope.scope_type)}" data-scope-key="${esc(scope.scope_key)}" ${f.retryable ? "" : "disabled"}>${f.retryable ? "重试" : "不可重试"}</button></div>`).join("")}`;
   refreshIcons();
 }
 RETRY_LOADERS.processing = loadProcessingStatus;

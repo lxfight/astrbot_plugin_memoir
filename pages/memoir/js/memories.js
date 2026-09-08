@@ -26,6 +26,7 @@ function memoryItem(m, i) {
     <div class="mem-body">
       <div class="mem-top">
         <span class="tag-chip badge t-${esc(m.memory_type)}"><i data-lucide="${icon}"></i>${esc(type)}</span>
+        ${m.source_type === "forwarded" ? `<span class="subject-chip">转发引用 · 非个人画像</span>` : ""}
         ${m.subject ? `<span class="subject-chip"><i data-lucide="user-round"></i>${esc(m.subject)}</span>` : ""}
       </div>
       <div class="mem-content">${esc(m.content)}</div>

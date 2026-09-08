@@ -16,6 +16,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import File, Image, Record, Video
 from astrbot.api.provider import LLMResponse
 
+from .forward_parser import snapshot_forward
 from .scope import merge_scope_config, resolve_scope
 from .storage import MemoryStore
 
@@ -31,6 +32,10 @@ def _capture_text(event: AstrMessageEvent) -> str:
     Returns:
         Text with media counts, without attachment URLs or binary data.
     """
+    forward = snapshot_forward(event)
+    if forward:
+        # Some adapters flatten quotes into message_str; keep the entire event quoted.
+        return "[转发消息：后台解析中，内容不代表转发者本人陈述]"
     text = (event.message_str or "").strip()
     chain = getattr(event.message_obj, "message", None) or []
     for component, label in (

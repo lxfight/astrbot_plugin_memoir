@@ -225,6 +225,25 @@ class MemoryStore:
             await self.connection.execute(
                 "UPDATE memories SET subject_id = 'legacy:' || subject WHERE scope_type = 'group' AND subject IS NOT NULL"
             )
+        cursor = await self.connection.execute("PRAGMA table_info(raw_turns)")
+        raw_columns = {row[1] for row in await cursor.fetchall()}
+        for name, definition in (
+            ("parent_id", "INTEGER"),
+            ("source_kind", "TEXT NOT NULL DEFAULT 'native'"),
+            ("source_meta", "TEXT NOT NULL DEFAULT '{}'"),
+        ):
+            if name not in raw_columns:
+                await self.connection.execute(
+                    f"ALTER TABLE raw_turns ADD COLUMN {name} {definition}"
+                )
+        await self.connection.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_raw_parent ON raw_turns(parent_id);
+            CREATE TRIGGER IF NOT EXISTS raw_forward_cleanup AFTER DELETE ON raw_turns
+            BEGIN
+                DELETE FROM work_items WHERE raw_id=OLD.id OR raw_id=OLD.parent_id;
+                DELETE FROM raw_turns WHERE parent_id=OLD.id;
+            END;
+        """)
         await self.connection.execute("DROP INDEX IF EXISTS idx_memories_scope_key")
         await self.connection.execute(
             """
@@ -237,7 +256,7 @@ class MemoryStore:
         if "umo" not in {row[1] for row in await cursor.fetchall()}:
             await self.connection.execute("ALTER TABLE scopes ADD COLUMN umo TEXT")
         await self.connection.execute(
-            "UPDATE work_items SET status = 'pending' WHERE kind = 'media' AND status = 'running'"
+            "UPDATE work_items SET status = 'pending' WHERE kind IN ('media','forward') AND status = 'running'"
         )
         cursor = await self.connection.execute(
             "PRAGMA table_info(consolidation_failures)"
@@ -368,7 +387,7 @@ class MemoryStore:
         """Persist media work or a quarantined consolidation failure.
 
         Args:
-            kind: Media or consolidation.
+            kind: Media, forward expansion, or consolidation.
             scope_type: Conversation type.
             scope_key: Conversation identifier.
             raw_ids: Source turn identifiers.
@@ -379,12 +398,12 @@ class MemoryStore:
             Work identifier.
         """
         now = int(time.time())
-        if kind == "media" and not error:
+        if kind in {"media", "forward"} and not error:
             cursor = await self.connection.execute(
-                "SELECT COUNT(*) FROM work_items WHERE kind='media' AND status IN ('pending','running')"
+                "SELECT COUNT(*) FROM work_items WHERE kind IN ('media','forward') AND status IN ('pending','running')"
             )
             if (await cursor.fetchone())[0] >= 32:
-                error = "Media queue is full; retry when capacity is available"
+                error = "Media/forward queue is full; retry when capacity is available"
         cursor = await self.connection.execute(
             "INSERT INTO work_items(kind,scope_type,scope_key,raw_ids,raw_id,payload,status,error,attempts,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (
@@ -392,7 +411,7 @@ class MemoryStore:
                 scope_type,
                 scope_key,
                 json.dumps(raw_ids),
-                raw_ids[0] if kind == "media" else None,
+                raw_ids[0] if kind in {"media", "forward"} else None,
                 json.dumps(payload or {}, ensure_ascii=False),
                 "failed" if error else "pending",
                 error[:300],
@@ -422,6 +441,8 @@ class MemoryStore:
         row = await cursor.fetchone()
         if not row:
             return False
+        if json.loads(row["payload"]).get("retryable") is False:
+            return False
         ids = json.loads(row["raw_ids"])
         if not ids:
             return False
@@ -431,9 +452,9 @@ class MemoryStore:
         )
         if (await cursor.fetchone())[0] != len(ids):
             return False
-        if row["kind"] == "media":
+        if row["kind"] in {"media", "forward"}:
             cursor = await self.connection.execute(
-                "SELECT COUNT(*) FROM work_items WHERE kind='media' AND status IN ('pending','running')"
+                "SELECT COUNT(*) FROM work_items WHERE kind IN ('media','forward') AND status IN ('pending','running')"
             )
             if (await cursor.fetchone())[0] >= 32:
                 return False
@@ -479,7 +500,7 @@ class MemoryStore:
         )
         oldest = (await cursor.fetchone())[0]
         cursor = await self.connection.execute(
-            "SELECT id,kind,status,error,attempts,created_at,updated_at,raw_ids FROM work_items WHERE scope_type=? AND scope_key=? AND status='failed' ORDER BY id DESC LIMIT 30",
+            "SELECT id,kind,status,error,attempts,created_at,updated_at,raw_ids,payload FROM work_items WHERE scope_type=? AND scope_key=? AND status='failed' ORDER BY id DESC LIMIT 30",
             (scope_type, scope_key),
         )
         failures = [dict(row) for row in await cursor.fetchall()]
@@ -489,8 +510,10 @@ class MemoryStore:
                 f"SELECT COUNT(*) FROM raw_turns WHERE id IN ({','.join('?' for _ in ids)}) AND scope_type=? AND scope_key=?",
                 (*ids, scope_type, scope_key),
             )
-            failure["retryable"] = bool(ids) and (await cursor.fetchone())[0] == len(
-                ids
+            failure["retryable"] = (
+                json.loads(failure.pop("payload")).get("retryable", True)
+                and bool(ids)
+                and (await cursor.fetchone())[0] == len(ids)
             )
         return {
             "counts": counts,
@@ -529,7 +552,7 @@ class MemoryStore:
         except (ValueError, TypeError):
             ids = []
         cursor = await self.connection.execute(
-            f"SELECT id,content,speaker_name,created_at FROM raw_turns WHERE id IN ({','.join('?' for _ in ids)}) AND scope_type=? AND scope_key=? ORDER BY id",
+            f"SELECT id,content,speaker_name,created_at,parent_id,source_kind,source_meta FROM raw_turns WHERE id IN ({','.join('?' for _ in ids)}) AND scope_type=? AND scope_key=? ORDER BY id",
             (*ids, scope_type, scope_key),
         )
         items = [dict(item) for item in await cursor.fetchall()]
@@ -555,7 +578,7 @@ class MemoryStore:
         async with self.connection.execute(
             """
             SELECT s.scope_type, s.scope_key, s.last_activity_at, s.last_consolidated_at, s.created_at,
-                   (SELECT COUNT(*) FROM raw_turns r
+                   (SELECT COUNT(DISTINCT COALESCE(r.parent_id,r.id)) FROM raw_turns r
                      WHERE r.scope_type = s.scope_type AND r.scope_key = s.scope_key
                        AND r.extracted = 0) AS pending
             FROM scopes s
@@ -596,6 +619,27 @@ class MemoryStore:
         """
         if self.connection is None:
             raise RuntimeError("数据库连接未初始化")
+        if source_ref:
+            try:
+                source_ids = json.loads(source_ref)
+                source_ids = (
+                    [i for i in source_ids if type(i) is int]
+                    if isinstance(source_ids, list)
+                    else []
+                )
+            except (TypeError, ValueError):
+                source_ids = []
+            if source_ids:
+                cursor = await self.connection.execute(
+                    f"SELECT id FROM raw_turns WHERE scope_type=? AND scope_key=? AND source_kind!='native' AND id IN ({','.join('?' for _ in source_ids)}) LIMIT 1",
+                    (scope_type, scope_key, *source_ids),
+                )
+                if await cursor.fetchone():
+                    source_type = "forwarded"
+        if source_type == "forwarded":
+            subject, subject_id = None, ""
+            memory_key = f"forward:{memory_key}" if memory_key else None
+            content = "[转发引用，署名未验证，不代表用户本人] " + content
         now = int(time.time())
         cursor = await self.connection.execute(
             """
@@ -775,7 +819,7 @@ class MemoryStore:
             """
             SELECT * FROM raw_turns
             WHERE scope_type = ? AND scope_key = ? AND extracted = 0
-              AND NOT EXISTS (SELECT 1 FROM work_items w WHERE w.raw_id=raw_turns.id AND w.kind='media' AND w.status IN ('pending','running'))
+              AND NOT EXISTS (SELECT 1 FROM work_items w WHERE w.raw_id=COALESCE(raw_turns.parent_id,raw_turns.id) AND w.kind IN ('media','forward') AND w.status IN ('pending','running'))
             ORDER BY created_at ASC, id ASC
             LIMIT ?
             """,
@@ -948,7 +992,7 @@ class MemoryStore:
         async with self.connection.execute(
             """
             SELECT * FROM memories
-            WHERE scope_type = ? AND scope_key = ? AND memory_type IN ('semantic', 'insight')
+            WHERE scope_type = ? AND scope_key = ? AND memory_type IN ('semantic', 'insight') AND source_type != 'forwarded'
             ORDER BY importance * strength DESC, updated_at DESC
             LIMIT ?
             """,
@@ -1063,9 +1107,9 @@ class MemoryStore:
             cap_cursor = await self.connection.execute(
                 """
                 DELETE FROM raw_turns
-                WHERE scope_type = ? AND scope_key = ? AND id NOT IN (
+                WHERE scope_type = ? AND scope_key = ? AND parent_id IS NULL AND id NOT IN (
                     SELECT id FROM raw_turns
-                    WHERE scope_type = ? AND scope_key = ?
+                    WHERE scope_type = ? AND scope_key = ? AND parent_id IS NULL
                     ORDER BY created_at DESC, id DESC
                     LIMIT ?
                 )
@@ -1089,9 +1133,9 @@ class MemoryStore:
         cursor = await self.connection.execute(
             """
             DELETE FROM raw_turns
-            WHERE scope_type = ? AND scope_key = ? AND id NOT IN (
+            WHERE scope_type = ? AND scope_key = ? AND parent_id IS NULL AND id NOT IN (
                 SELECT id FROM raw_turns
-                WHERE scope_type = ? AND scope_key = ?
+                WHERE scope_type = ? AND scope_key = ? AND parent_id IS NULL
                 ORDER BY created_at DESC, id DESC
                 LIMIT ?
             )
@@ -1190,7 +1234,7 @@ class MemoryStore:
                      WHERE m.scope_type = s.scope_type AND m.scope_key = s.scope_key) AS memory_count,
                    (SELECT COUNT(*) FROM raw_turns r
                      WHERE r.scope_type = s.scope_type AND r.scope_key = s.scope_key) AS raw_count,
-                   (SELECT COUNT(*) FROM raw_turns r
+                   (SELECT COUNT(DISTINCT COALESCE(r.parent_id,r.id)) FROM raw_turns r
                      WHERE r.scope_type = s.scope_type AND r.scope_key = s.scope_key
                        AND r.extracted = 0) AS pending_count
             FROM scopes s
