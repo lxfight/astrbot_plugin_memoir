@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-09
+
 ### 新增
 
 - 增加插件 LLM 用量账目：记录巩固与图片／音频调用及重试的提供商、模型、会话、未缓存输入、缓存输入、输出、耗时和状态；未知用量不估算，取消与进程中断可追踪，不保存提示词、回复正文或媒体引用。
@@ -120,7 +122,8 @@
 - 收窄模型巩固指令与原文数据混合造成的提示注入影响面。
 - 拆分 WebUI 样式与 ES 模块，增加完整记忆流程回归测试。
 
-[Unreleased]: https://github.com/lxfight/astrbot_plugin_memoir/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/lxfight/astrbot_plugin_memoir/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.7.0
 [0.6.0]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.6.0
 [0.5.0]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.5.0
 [0.4.1]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.4.1

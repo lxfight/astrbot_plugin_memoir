@@ -1,6 +1,6 @@
 [project]
 name = "astrbot-plugin-memoir"
-version = "0.6.0"
+version = "0.7.0"
 description = "模拟人脑记忆闭环的 AstrBot 长期记忆插件"
 license = "MIT"
 requires-python = ">=3.10"
