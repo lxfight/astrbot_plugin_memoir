@@ -195,12 +195,17 @@ class MediaProcessor:
                 )
                 description = await asyncio.wait_for(
                     describe_multimedia(
-                        self.context, effective, event, problems=problems
+                        self.context,
+                        effective,
+                        event,
+                        problems=problems,
+                        store=store,
+                        scope=(scope_type, scope_key),
                     ),
-                    timeout=45,
+                    timeout=110,
                 )
             except asyncio.TimeoutError:
-                problems.append("Media processing exceeded the 45-second deadline")
+                problems.append("Media processing exceeded the 110-second deadline")
             except Exception as exc:
                 problems.append(f"Media processing failed: {type(exc).__name__}")
         async with store.transaction():
@@ -307,8 +312,10 @@ class MediaProcessor:
                             event,
                             problems=issues,
                             report_unsupported=True,
+                            store=store,
+                            scope=(scope_type, scope_key),
                         ),
-                        45,
+                        110,
                     )
                     if description:
                         result.nodes.append(

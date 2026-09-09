@@ -86,9 +86,10 @@ export function renderDetailHead() {
   );
   const hasOverride = s?.custom;
   const disabled = s?.enabled === false;
-  if (["global", "consents"].includes(state.tab)) {
-    $("detail-head").innerHTML = `<div><div class="name">${state.tab === "global" ? "全局设置" : "桥接授权"}</div><div class="sub">对所有会话生效</div></div>`;
-    $("mobile-title").textContent = state.tab === "global" ? "全局设置" : "桥接授权";
+  if (["global", "consents", "usage"].includes(state.tab)) {
+    const title = { global: "全局设置", consents: "桥接授权", usage: "用量统计" }[state.tab];
+    $("detail-head").innerHTML = `<div><div class="name">${title}</div><div class="sub">${state.tab === "usage" ? "记忆插件主动调用 · AstrBot 返回的实际 token" : "对所有会话生效"}</div></div>`;
+    $("mobile-title").textContent = title;
     return;
   }
   $("mobile-title").textContent = state.scope ? scopeName(state.scope) : "记忆管理";

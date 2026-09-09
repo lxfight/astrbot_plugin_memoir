@@ -432,6 +432,8 @@ async def test_forward_media_mapping_and_capability_fallback(store, monkeypatch)
         "媒体段1: 转发节点" in r["content"] and "红色海报" in r["content"] for r in rows
     )
     assert all("photo.jpg" not in r["content"] for r in rows)
+    assert describe.call_args.kwargs["store"] is store
+    assert describe.call_args.kwargs["scope"] == ("group", "test:g1")
 
 
 @pytest.mark.asyncio

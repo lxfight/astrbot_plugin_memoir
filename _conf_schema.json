@@ -2,10 +2,24 @@
   "background_llm_provider": {
     "description": "后台小模型",
     "type": "string",
-    "hint": "用于记忆巩固、洞察及图片/语音解析，留空则使用当前会话模型。巩固会把本批原文与相关记忆发送给所选模型，并可能分批调用和重试。模型支持对应媒体时，每条媒体消息通常额外调用 1 次描述模型，手动重试会再次调用；不支持时保留占位符。费用按所选提供商计费。",
+    "hint": "用于记忆巩固和未单独配置的多媒体处理；留空则使用当前会话模型。每次调用与重试都会计入插件用量统计。",
     "obvious_hint": true,
     "_special": "select_provider",
     "default": ""
+  },
+  "image_llm_provider": {
+    "description": "图片处理模型",
+    "type": "string",
+    "_special": "select_provider",
+    "default": "",
+    "hint": "通过 AstrBot 选择模型；留空继承后台小模型，再回退当前会话模型。需要 image 输入能力。"
+  },
+  "audio_llm_provider": {
+    "description": "音频处理模型",
+    "type": "string",
+    "_special": "select_provider",
+    "default": "",
+    "hint": "通过 AstrBot 选择模型；留空继承后台小模型，再回退当前会话模型。需要 audio 输入能力。"
   },
   "enable_private_memory": {
     "description": "启用私聊记忆",

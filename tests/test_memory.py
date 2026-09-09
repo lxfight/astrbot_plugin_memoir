@@ -630,7 +630,16 @@ async def test_consolidation_related_recall_narrows_prompt(monkeypatch):
     )
     prompts: list[str] = []
 
-    async def fake_llm(context, config, *, prompt, system_prompt, event=None):
+    async def fake_llm(
+        context,
+        config,
+        *,
+        prompt,
+        system_prompt,
+        event=None,
+        store=None,
+        scope=("", ""),
+    ):
         prompts.append(prompt)
         return json.dumps(
             {
@@ -957,7 +966,16 @@ async def test_consolidation_parse_failure_backs_up_batch(monkeypatch):
         scope_type="private", scope_key="p:1", content="用户说会带特产回来"
     )
 
-    async def fake_llm(context, config, *, prompt, system_prompt, event=None):
+    async def fake_llm(
+        context,
+        config,
+        *,
+        prompt,
+        system_prompt,
+        event=None,
+        store=None,
+        scope=("", ""),
+    ):
         return "抱歉，这不是 JSON"
 
     monkeypatch.setattr(consolidation_module, "call_background_llm", fake_llm)
@@ -985,7 +1003,16 @@ async def test_consolidation_llm_failure_is_retryable(monkeypatch):
         scope_type="private", scope_key="p:1", content="用户提到下周去北京出差"
     )
 
-    async def fake_llm(context, config, *, prompt, system_prompt, event=None):
+    async def fake_llm(
+        context,
+        config,
+        *,
+        prompt,
+        system_prompt,
+        event=None,
+        store=None,
+        scope=("", ""),
+    ):
         return None
 
     monkeypatch.setattr(consolidation_module, "call_background_llm", fake_llm)
@@ -1009,7 +1036,16 @@ async def test_consolidation_pass_caps_scopes_and_prefers_backlog(monkeypatch):
     """单次扫描最多处理 _MAX_SCOPES_PER_PASS 个 scope，优先积压最大者"""
     store = await _make_store()
 
-    async def fake_llm(context, config, *, prompt, system_prompt, event=None):
+    async def fake_llm(
+        context,
+        config,
+        *,
+        prompt,
+        system_prompt,
+        event=None,
+        store=None,
+        scope=("", ""),
+    ):
         return '{"semantic_ops": [], "insight": null}'
 
     monkeypatch.setattr(consolidation_module, "call_background_llm", fake_llm)
@@ -1045,7 +1081,16 @@ async def test_consolidation_batch_respects_char_budget(monkeypatch):
     store = await _make_store()
     prompts: list[str] = []
 
-    async def fake_llm(context, config, *, prompt, system_prompt, event=None):
+    async def fake_llm(
+        context,
+        config,
+        *,
+        prompt,
+        system_prompt,
+        event=None,
+        store=None,
+        scope=("", ""),
+    ):
         prompts.append(prompt)
         return '{"semantic_ops": [], "insight": null}'
 

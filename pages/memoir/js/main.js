@@ -4,12 +4,13 @@ import { bridge, safe } from "./api.js";
 import { initTheme } from "./theme.js";
 import { renderOverview, renderSidebar, renderDetailHead } from "./sidebar.js";
 import { loadMemories } from "./memories.js";
+import { loadUsage } from "./usage.js";
 import { loadRaw, stopRawHistory, toggleRawSelection } from "./raw-history.js";
 import { renderFilters, renderSelection } from "./list.js";
 import { ask, canLeave, isDirty, openEditor, openSources, openRawEvent } from "./dialogs.js";
 import { loadScopeConfigTab, resetScopeConfig, loadConsentPage, loadProcessingPage, loadProcessingStatus, stopProcessing } from "./settings.js";
 
-const globalView = () => ["global", "consents"].includes(state.tab);
+const globalView = () => ["global", "consents", "usage"].includes(state.tab);
 const viewKey = () => JSON.stringify([state.scope?.scope_type, state.scope?.scope_key, state.tab]);
 let navigating = false;
 
@@ -37,7 +38,8 @@ async function loadTab() {
   } else if (state.tab === "processing") {
     $("filters").innerHTML = `<label>任务状态<select data-filter="task_status">${[["", "全部状态"], ["failed", "失败"], ["pending", "排队"], ["running", "处理中"], ["complete", "完成"]].map(([value, label]) => `<option value="${value}" ${state.filters.task_status === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>`;
     await loadProcessingPage();
-  } else if (state.tab === "consents") await loadConsentPage();
+  } else if (state.tab === "usage") await loadUsage();
+  else if (state.tab === "consents") await loadConsentPage();
   else await loadScopeConfigTab();
   refreshIcons();
 }

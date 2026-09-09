@@ -68,6 +68,17 @@ beforeEach(async () => {
         if (endpoint === "processing") return { counts: [{ kind: "media", status: "failed", count: 1 }], oldest_pending_seconds: 7200, failures: [{ id: 7, kind: "media", error: "Model timed out", attempts: 1, updated_at: now, retryable: true }] };
         if (endpoint === "memories/sources") return { items: [{ id: 3, content: "Original <script>unsafe()</script> text", speaker_name: "小张" }], tracked: true, expired: 1 };
         if (endpoint === "consents") return { items: [] };
+        if (endpoint === "usage") {
+          window.usageRequests ??= []; window.usageRequests.push(params);
+          const offset = Number(params.offset || 0), until = now + 1;
+          const since = (Math.floor((now + offset * 60) / 86400) - Number(params.days || 30) + 1) * 86400 - offset * 60;
+          const totals = { calls: 4, reported_calls: 3, failed_calls: 1, input_other: 12345, input_cached: 6000, output: 789 };
+          const daily = Array.from({ length: 7 }, (_, index) => ({ ...totals, day: new Date((until + offset * 60 - (6 - index) * 86400) * 1000).toISOString().slice(0, 10), input_other: 1500 + index * 50, input_cached: 600 + index * 50, output: 100 + index * 3 }));
+          return { since, until, offset, totals, daily, provider_id: [{ ...totals, provider_id: "vision-model" }], purpose: [{ ...totals, purpose: "media_image" }], items: [
+            { id: params.before ? 2 : 52, created_at: now, scope_type: "private", scope_key: "test:小张", provider_id: "vision-model", model: "vision-v2", purpose: "media_image", input_other: 12345, input_cached: 6000, output: 789, duration_ms: 1530, status: "complete" },
+            { id: params.before ? 1 : 51, created_at: now - 3600, scope_type: "group", scope_key: "test:周末摄影小组", provider_id: "audio-model", model: "audio-v1", purpose: "media_audio", input_other: null, input_cached: null, output: null, duration_ms: 30000, status: "error", error_type: "TimeoutError" },
+          ], next_cursor: params.before ? null : 51 };
+        }
         throw new Error(`Unexpected endpoint: ${endpoint}`);
       },
     };
@@ -81,6 +92,73 @@ beforeEach(async () => {
 afterEach(async () => {
   await context?.close();
   assert.deepEqual(errors, []);
+});
+
+test("usage shows exact cache-aware totals, unknown calls and bounded detail pages", async () => {
+  await page.locator('[data-view="usage"]').click();
+  assert.equal(await page.locator(".usage-primary strong").textContent(), "19,134");
+  assert.equal(await page.locator(".usage-kpi").last().locator("strong").textContent(), "1");
+  assert.match(await page.locator(".usage-details tbody tr").last().textContent(), /未知/);
+  await page.locator(".usage-chart [data-day]").last().focus();
+  assert.match(await page.locator("#usage-day").textContent(), /缓存输入 900/);
+  await page.locator("#usage-next").click();
+  await page.waitForFunction(() => window.usageRequests.at(-1).before === 51);
+  assert.equal(await page.locator(".usage-details tbody tr").count(), 2);
+  assert.equal(await page.locator("#usage-next").isDisabled(), true);
+  await page.locator("#usage-prev").click();
+  await page.locator('[data-filter="days"]').selectOption("7");
+  await page.locator('[data-filter="usage_scope"]').selectOption("group|test:周末摄影小组");
+  await page.locator('[data-filter="provider"]').selectOption("vision-model");
+  await page.locator('[data-filter="purpose"]').selectOption("media_image");
+  const params = await page.evaluate(() => window.usageRequests.at(-1));
+  assert.equal(params.days, "7"); assert.equal(params.scope_type, "group");
+  assert.equal(params.scope_key, "test:周末摄影小组"); assert.equal(params.provider, "vision-model");
+  assert.equal(params.purpose, "media_image"); assert.equal(params.before, 0);
+});
+
+test("usage works without scopes, ignores late responses and can retry failures", async () => {
+  await page.evaluate(() => {
+    const apiGet = window.AstrBotPluginPage.apiGet;
+    window.AstrBotPluginPage.apiGet = async (endpoint, params) => {
+      if (endpoint === "overview") return { totals: { scopes: 0, memories: 0, raw_turns: 0, pending: 0 }, scopes: [] };
+      if (endpoint === "usage" && window.delayUsage) await new Promise(resolve => { window.finishUsage = resolve; });
+      if (endpoint === "usage" && window.failUsage) throw new Error("Offline");
+      return apiGet(endpoint, params);
+    };
+  });
+  await page.locator("#refresh").click();
+  await page.locator('[data-view="usage"]').click();
+  await page.locator(".usage-page").waitFor();
+  await page.evaluate(() => { window.delayUsage = true; });
+  await page.locator('[data-filter="days"]').selectOption("7");
+  await page.waitForFunction(() => Boolean(window.finishUsage));
+  await page.locator('[data-view="global"]').click();
+  await page.locator("#global-image_llm_provider").waitFor();
+  await page.evaluate(() => { window.delayUsage = false; window.finishUsage(); });
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator(".usage-page").count(), 0);
+  await page.evaluate(() => { window.failUsage = true; });
+  await page.locator('[data-view="usage"]').click();
+  await page.locator('[data-retry="usage"]').waitFor();
+  await page.evaluate(() => { window.failUsage = false; });
+  await page.locator('[data-retry="usage"]').click();
+  await page.locator(".usage-page").waitFor();
+});
+
+test("usage dashboard renders at 1080p in both themes and fits mobile", async () => {
+  await page.locator('[data-view="usage"]').click();
+  const output = process.env.MEMOIR_SCREENSHOT_DIR;
+  if (output) await fs.mkdir(output, { recursive: true });
+  for (const [label, theme] of [["浅色", "light"], ["深色", "dark"]]) {
+    await page.getByRole("radio", { name: label, exact: true }).check();
+    await page.waitForFunction(expected => document.documentElement.dataset.theme === expected, theme);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    if (output) await page.screenshot({ path: path.join(output, `usage-${theme}.png`) });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  if (output) await page.screenshot({ path: path.join(output, "usage-mobile.png"), fullPage: true });
 });
 
 test("manual appearance survives host updates and reloads; auto tracks host", async () => {
@@ -115,11 +193,16 @@ test("provider select and global save use global fields, not scope overrides", a
   assert.equal(await page.locator("#scope-recall_top_k").inputValue(), "2");
   await page.locator('[data-view="global"]').click();
   await page.locator("#global-background_llm_provider").selectOption("audio-model");
+  await page.locator("#global-image_llm_provider").selectOption("vision-model");
+  await page.locator("#global-audio_llm_provider").selectOption("audio-model");
   await page.locator("#global-recall_top_k").fill("11");
   await page.locator("#save-global-cfg").click();
   const request = await page.evaluate(() => window.savedRequests.at(-1));
   assert.equal(request.endpoint, "config/update");
   assert.equal(request.payload.background_llm_provider, "audio-model");
+  assert.equal(request.payload.image_llm_provider, "vision-model");
+  assert.equal(request.payload.audio_llm_provider, "audio-model");
+  assert.equal(await page.locator("#global-video_llm_provider").count(), 0);
   assert.equal(request.payload.recall_top_k, 11);
   assert.equal(await page.locator("#scope-recall_top_k").count(), 0);
 });

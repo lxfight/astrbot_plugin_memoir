@@ -10,7 +10,9 @@ const GLOBAL_FIELDS = [
     items: [
       { key: "enable_private_memory", label: "启用私聊记忆", type: "switch", hint: "默认开启，保存用户与助手的私聊轮次。关闭后停止捕获、召回与巩固，已有数据需单独清空" },
       { key: "enable_group_memory", label: "启用群聊记忆", type: "switch", hint: "默认开启：会被动记录机器人收到的群消息，无需 @ 或触发回复；指令和忽略规则仍生效。后台巩固会把原文发送给所选模型。关闭后停止捕获、召回与巩固，已有数据需单独清空" },
-      { key: "background_llm_provider", label: "后台小模型", type: "provider", hint: "巩固会发送本批原文与相关记忆，留空则用当前会话模型。巩固可能分批调用和重试；每条受支持媒体通常额外调用 1 次描述模型，手动重试会再次调用。费用按提供商计费" },
+      { key: "background_llm_provider", label: "后台小模型", type: "provider", hint: "用于记忆巩固及未单独指定的媒体处理；留空使用当前会话模型。实际调用及重试记录在用量统计中" },
+      { key: "image_llm_provider", label: "图片处理模型", type: "provider", fallback: "继承后台模型", hint: "选择 AstrBot 中支持 image 输入的模型，描述图片与识别文字" },
+      { key: "audio_llm_provider", label: "音频处理模型", type: "provider", fallback: "继承后台模型", hint: "选择支持 audio 输入的聊天模型，转写音频。留空继承后台模型，再回退当前会话模型" },
     ],
   },
   {
@@ -64,7 +66,7 @@ function fieldRow(f, value, inheritValue, inheritable, effectiveValue) {
     } else if (f.type === "select" || f.type === "provider") {
       const opts = (f.type === "provider" ? state.providers : f.options) || [];
       control = `<select class="f-input" data-cfg="${f.key}">${
-        f.type === "provider" ? `<option value="">（使用当前对话模型）</option>` : ""
+        f.type === "provider" ? `<option value="">（${f.fallback || "使用当前对话模型"}）</option>` : ""
       }${opts.map((o) => `<option value="${esc(o)}" ${value === o ? "selected" : ""}>${esc(f.type === "provider" ? o : { low: "low 仅日常事实", medium: "medium 含一般隐私", high: "high 不限制" }[o] || o)}</option>`).join("")}</select>`;
     } else {
       control = `<input type="number" class="f-input" data-cfg="${f.key}" value="${value ?? ""}" step="${f.type === "float" ? "0.01" : "1"}" min="${f.min ?? 0}" max="${f.max ?? (f.type === "float" ? 1 : 100000)}" />`;

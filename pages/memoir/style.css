@@ -653,8 +653,9 @@ html[data-theme="dark"] .toast { background: #232c3a; border: 1px solid var(--bo
 /* Notebook workspace: quiet surfaces and explicit record actions. */
 [hidden] { display: none !important; }
 .brand-logo { width: 48px; height: 48px; flex-shrink: 0; }
-.global-nav { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); }
+.global-nav { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); }
 .global-nav .btn { flex: 1; justify-content: center; }
+.global-nav [data-view="usage"] { flex-basis: 100%; }
 .global-nav .active { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-border); }
 .mobile-bar, .scope-backdrop { display: none; }
 .filter-bar { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; padding: 12px 24px; background: var(--surface); border-bottom: 1px solid var(--border); }

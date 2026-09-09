@@ -118,7 +118,17 @@ class FakeConsolidator:
         self.prompts: list[str] = []
         self.systems: list[str] = []
 
-    async def __call__(self, context, config, *, prompt, system_prompt, event=None):
+    async def __call__(
+        self,
+        context,
+        config,
+        *,
+        prompt,
+        system_prompt,
+        event=None,
+        store=None,
+        scope=("", ""),
+    ):
         self.prompts.append(prompt)
         self.systems.append(system_prompt)
         assert self.outputs, "fake LLM received more calls than scripted outputs"

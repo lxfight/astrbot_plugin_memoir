@@ -161,6 +161,23 @@ CREATE TABLE IF NOT EXISTS work_items (
     updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_work_status ON work_items(kind, status, id);
+CREATE TABLE IF NOT EXISTS llm_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at INTEGER NOT NULL,
+    scope_type TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    input_other INTEGER,
+    input_cached INTEGER,
+    output INTEGER,
+    duration_ms INTEGER,
+    error_type TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_usage_time ON llm_usage(created_at, id);
+CREATE INDEX IF NOT EXISTS idx_usage_scope_time ON llm_usage(scope_type, scope_key, created_at);
 """
 
 
@@ -209,6 +226,9 @@ class MemoryStore:
         await self.connection.execute("PRAGMA journal_mode = WAL")
         await self.connection.execute("PRAGMA busy_timeout = 10000")
         await self.connection.executescript(SCHEMA_SQL)
+        await self.connection.execute(
+            "UPDATE llm_usage SET status='interrupted' WHERE status='running'"
+        )
         # memory_key 迁移：旧库的 memories 表没有该列，CREATE TABLE IF NOT EXISTS
         # 不会补列，须先 ALTER 再建唯一索引（索引依赖该列，不能放进 SCHEMA_SQL）
         cursor = await self.connection.execute("PRAGMA table_info(memories)")
@@ -333,6 +353,114 @@ class MemoryStore:
         if self.connection:
             await self.connection.close()
             self.connection = None
+
+    @serialized
+    async def start_llm_usage(self, scope_type, scope_key, purpose, provider_id, model):
+        """Persist a request before dispatch so interrupted calls remain visible.
+
+        Args:
+            scope_type: Conversation type.
+            scope_key: Conversation identity.
+            purpose: Plugin task category.
+            provider_id: AstrBot provider ID, never credentials.
+            model: Selected model name.
+
+        Returns:
+            Ledger record ID.
+        """
+        cursor = await self.connection.execute(
+            "INSERT INTO llm_usage(created_at,scope_type,scope_key,purpose,provider_id,model) VALUES(?,?,?,?,?,?)",
+            (int(time.time()), scope_type, scope_key, purpose, provider_id, model),
+        )
+        return cursor.lastrowid
+
+    @serialized
+    async def finish_llm_usage(
+        self, record_id, status, counts, duration_ms, error_type
+    ):
+        """Finalize one dispatched call using reported counts or unknown values.
+
+        Args:
+            record_id: Ledger record to update.
+            status: Call outcome.
+            counts: Input, cached input and output counts, or three null values.
+            duration_ms: Request duration in milliseconds.
+            error_type: Exception class only; no payload or response text.
+        """
+        await self.connection.execute(
+            "UPDATE llm_usage SET status=?,input_other=?,input_cached=?,output=?,duration_ms=?,error_type=? WHERE id=?",
+            (status, *counts, duration_ms, error_type, record_id),
+        )
+
+    @serialized
+    async def get_llm_usage(
+        self,
+        since,
+        until,
+        offset_minutes=0,
+        scope=None,
+        provider="",
+        purpose="",
+        before=0,
+    ):
+        """Aggregate reported tokens and return a cursor page of request details.
+
+        Args:
+            since: Inclusive Unix start time.
+            until: Exclusive Unix end time.
+            offset_minutes: Local timezone offset east of UTC.
+            scope: Optional conversation type/key pair.
+            provider: Optional exact provider ID.
+            purpose: Optional task category.
+            before: Exclusive ledger ID for detail pagination.
+
+        Returns:
+            Totals, daily bars, provider/task groups and up to 50 call records.
+        """
+        where, args = ["created_at>=?", "created_at<?"], [since, until]
+        if scope:
+            where += ["scope_type=?", "scope_key=?"]
+            args.extend(scope)
+        for column, value in (("provider_id", provider), ("purpose", purpose)):
+            if value:
+                where.append(f"{column}=?")
+                args.append(value)
+        condition = " AND ".join(where)
+        metrics = """COUNT(*) AS calls, COALESCE(SUM(input_other IS NOT NULL),0) AS reported_calls,
+            COALESCE(SUM(status IN ('error','cancelled','interrupted')),0) AS failed_calls,
+            COALESCE(SUM(input_other),0) AS input_other,
+            COALESCE(SUM(input_cached),0) AS input_cached, COALESCE(SUM(output),0) AS output"""
+        cursor = await self.connection.execute(
+            f"SELECT {metrics} FROM llm_usage WHERE {condition}", args
+        )
+        totals = dict(await cursor.fetchone())
+        daily = await self.connection.execute(
+            f"SELECT date(created_at+?, 'unixepoch') AS day,{metrics} FROM llm_usage WHERE {condition} GROUP BY day ORDER BY day",
+            [offset_minutes * 60, *args],
+        )
+        result = {
+            "totals": totals,
+            "daily": [dict(row) for row in await daily.fetchall()],
+        }
+        for group in ("provider_id", "purpose"):
+            cursor = await self.connection.execute(
+                f"SELECT {group},{metrics} FROM llm_usage WHERE {condition} GROUP BY {group} ORDER BY SUM(COALESCE(input_other,0)+COALESCE(input_cached,0)+COALESCE(output,0)) DESC",
+                args,
+            )
+            result[group] = [dict(row) for row in await cursor.fetchall()]
+        detail_args = list(args)
+        if before:
+            condition += " AND id<?"
+            detail_args.append(before)
+        cursor = await self.connection.execute(
+            f"SELECT * FROM llm_usage WHERE {condition} ORDER BY id DESC LIMIT 51",
+            detail_args,
+        )
+        rows = [dict(row) for row in await cursor.fetchall()]
+        result.update(
+            items=rows[:50], next_cursor=rows[49]["id"] if len(rows) > 50 else None
+        )
+        return result
 
     @serialized
     async def browse_records(

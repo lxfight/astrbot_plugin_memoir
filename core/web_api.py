@@ -9,6 +9,7 @@ WebUI 后端接口：供插件 Pages（pages/memoir/）通过 bridge 调用。
 
 from __future__ import annotations
 
+import time
 import weakref
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +30,8 @@ GLOBAL_CONFIG_KEYS = (
     "enable_private_memory",
     "enable_group_memory",
     "background_llm_provider",
+    "image_llm_provider",
+    "audio_llm_provider",
     "recall_top_k",
     "recall_max_chars",
     "consolidation_related_top_k",
@@ -50,6 +53,8 @@ GLOBAL_DEFAULTS = {
     "enable_private_memory": True,
     "enable_group_memory": True,
     "background_llm_provider": "",
+    "image_llm_provider": "",
+    "audio_llm_provider": "",
     "recall_top_k": 5,
     "recall_max_chars": 6000,
     "consolidation_related_top_k": 20,
@@ -164,6 +169,46 @@ class WebApi:
         if plugin is None or plugin._terminating or not plugin._initialized:
             return None
         return plugin.store, plugin.config
+
+    async def usage(self):
+        """Read plugin-only reported usage with bounded range and detail pages.
+
+        Returns:
+            JSON aggregates and calls, or an error for invalid query parameters.
+        """
+        ctx = self._ctx()
+        if ctx is None:
+            return error_response("plugin unavailable")
+        try:
+            days = int(request.query.get("days", "30"))
+            offset = int(request.query.get("offset", "0"))
+            before = int(request.query.get("before", "0"))
+        except (TypeError, ValueError):
+            return error_response("invalid usage range")
+        if (
+            days not in (7, 30, 90, 365)
+            or not -840 <= offset <= 840
+            or not 0 <= before < 2**63
+        ):
+            return error_response("invalid usage range")
+        scope = None
+        if request.query.get("scope_type") or request.query.get("scope_key"):
+            scope = self._require_scope()
+            if scope is None:
+                return error_response("invalid scope")
+        now = int(time.time())
+        since = ((now + offset * 60) // 86400 - days + 1) * 86400 - offset * 60
+        result = await ctx[0].get_llm_usage(
+            since,
+            now + 1,
+            offset,
+            scope,
+            request.query.get("provider", "")[:200],
+            request.query.get("purpose", "")[:80],
+            before,
+        )
+        result.update(since=since, until=now + 1, offset=offset)
+        return json_response(result)
 
     async def browse(self):
         """Return filtered, paginated memories or grouped raw events."""

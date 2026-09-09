@@ -63,6 +63,7 @@ class MemoirPlugin(Star):
         prefix = f"/{_PLUGIN_NAME}"
         for path, handler, method, description in (
             ("browse", api.browse, "GET", "Browse filtered records"),
+            ("usage", api.usage, "GET", "Read plugin token usage"),
             ("raw/event", api.raw_event, "GET", "Read complete source event"),
             ("memories/update", api.edit_memory, "POST", "Edit memory text"),
             ("records/delete", api.delete_records, "POST", "Delete selected records"),

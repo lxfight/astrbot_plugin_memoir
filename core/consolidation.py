@@ -391,6 +391,8 @@ async def _consolidate_scope(
                     call_background_llm(
                         context,
                         dict(effective, _require_session=True),
+                        store=store,
+                        scope=(scope_type, scope_key),
                         prompt=prompt,
                         system_prompt=system_prompt,
                         event=SimpleNamespace(unified_msg_origin=umo) if umo else None,
