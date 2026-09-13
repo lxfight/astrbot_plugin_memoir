@@ -137,7 +137,8 @@
 - 收窄模型巩固指令与原文数据混合造成的提示注入影响面。
 - 拆分 WebUI 样式与 ES 模块，增加完整记忆流程回归测试。
 
-[Unreleased]: https://github.com/lxfight/astrbot_plugin_memoir/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/lxfight/astrbot_plugin_memoir/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.8.0
 [0.7.0]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.7.0
 [0.6.0]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.6.0
 [0.5.0]: https://github.com/lxfight/astrbot_plugin_memoir/releases/tag/v0.5.0
