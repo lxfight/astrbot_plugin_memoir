@@ -21,6 +21,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.core.agent.message import TextPart
 from astrbot.core.provider.entities import ProviderRequest
 
+from .compatibility import native_policy
 from .scope import merge_scope_config, resolve_scope
 from .storage import MemoryStore
 
@@ -247,6 +248,9 @@ async def handle_recall(
     )
     if not config.get("scope_enabled", True):
         return
+    native = await native_policy(
+        context, config, event.unified_msg_origin, scope_type, check_request_image=False
+    )
 
     # 线索提取：当前句优先，最近几轮原文补充——同义词/指代常出现在前后文，
     # 线索来自整个情境而非单句才是「编码特异性」的完整实现
@@ -283,7 +287,7 @@ async def handle_recall(
         # 私聊：req.contexts 即模型当前可见的会话历史（OpenAI 格式 dict 列表），
         # 其中的轮次不再重复召回，线索层只检索更早的原文——否则上下文线索
         # 扩展取自最近原文，必然命中这些原文本身，注入等于浪费 token；
-        # 群聊本就没有会话历史，近因层另行为其补充。
+        # Group history is supplied separately when native context is enabled.
         # 可见轮次数按 user 消息数计（每轮一条），比假定 user/assistant
         # 严格成对更稳健：存在工具消息等非成对条目时仍正确。
         exclude_recent = (
@@ -304,6 +308,46 @@ async def handle_recall(
             exclude_recent=exclude_recent,
             phrase=phrase,
         )
+        if scope_type == "group" and config.get("auto_native_compatibility", True):
+            # Compare only raw text against already-visible request content;
+            # structured memories retain their separate recall semantics.
+            visible = [req.prompt or ""]
+            visible.extend(
+                getattr(part, "text", "") for part in req.extra_user_content_parts or []
+            )
+            for message in req.contexts or []:
+                content = (
+                    message.get("content", "")
+                    if isinstance(message, dict)
+                    else getattr(message, "content", "")
+                )
+                if isinstance(content, str):
+                    visible.append(content)
+                elif isinstance(content, list):
+                    visible.extend(
+                        part.get("text", "")
+                        if isinstance(part, dict)
+                        else getattr(part, "text", "")
+                        for part in content
+                    )
+            visible = [
+                " ".join(line.split())
+                for text in visible
+                if isinstance(text, str)
+                for line in [text, *text.splitlines()]
+            ]
+            retained = []
+            for row in cued_raw:
+                text = " ".join(row["content"].removeprefix("助手: ").split())
+                if text and any(
+                    text == part
+                    or (len(text) >= 12 and text in part)
+                    or part.endswith("]: " + text)
+                    for part in visible
+                ):
+                    continue
+                retained.append(row)
+            cued_raw = retained
     cued_ids = {m["id"] for m in cued}
     raw_ids = {m["id"] for m in cued_raw}
 
@@ -319,6 +363,8 @@ async def handle_recall(
     # 近因层（仅群聊）
     recent: list[dict] = []
     recent_k = int(config.get("recall_recent_turns", 5))
+    if native["recent"]:
+        recent_k = 0
     if scope_type == "group" and recent_k > 0:
         recent_pool = await store.get_recent_raw(
             scope.scope_type, scope.scope_key, recent_k + len(cued_raw)

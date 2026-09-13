@@ -15,6 +15,8 @@ from dataclasses import dataclass
 
 from astrbot.api.event import AstrMessageEvent
 
+from .media_policy import MEDIA_SCOPE_KEYS
+
 # 会话可覆盖、且会被合并进钩子配置字典的键。
 # 「enabled」「bridge_enabled」映射为新键，与全局开关叠加判断。
 _DIRECT_KEYS = (
@@ -44,8 +46,12 @@ def merge_scope_config(base: dict, override: dict | None, scope_type: str) -> di
     - bridge_max_sensitivity -> 同名键
     """
     cfg = dict(base)
+    cfg["_media_global"] = dict(base)
     if not override:
         return cfg
+    for key in MEDIA_SCOPE_KEYS:
+        if override.get(key) is not None:
+            cfg[key] = override[key]
     if override.get("enabled") is not None:
         cfg["scope_enabled"] = bool(override["enabled"])
     for key in _DIRECT_KEYS:

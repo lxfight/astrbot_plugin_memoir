@@ -1,6 +1,7 @@
 import { $, state } from "./state.js";
 import { esc, longText, refreshIcons, toast } from "./utils.js";
 import { bridge, safe } from "./api.js";
+import { budgetCard } from "./media-settings.js";
 
 export function ask(title, message, accept = "确认", danger = false) {
   const dialog = $("confirm-dialog");
@@ -94,8 +95,9 @@ export async function openRawEvent(id, scope, back = null) {
     }).join("") + [...node.children].map(([key, child]) => `<details class="forward-node" open><summary>节点 ${esc([...path, key].join("."))}</summary>${renderTree(child, [...path, key])}</details>`).join("");
   }
   const records = [result.root, ...result.items];
-  $("source-body").innerHTML = `<p id="source-feedback" role="status"></p><article class="source-card"><strong>原始消息 #${result.root.id}</strong>${longText(result.root.content)}<button class="btn" data-copy-source="all">复制完整消息</button></article>${renderTree(tree)}`;
+  $("source-body").innerHTML = `<p id="source-feedback" role="status"></p><article class="source-card"><strong>原始消息 #${result.root.id}</strong>${longText(result.root.content)}<button class="btn" data-copy-source="all">复制完整消息</button></article>${renderTree(tree)}${result.media_job?.retryable ? `<button type="button" class="btn primary" data-manual-media>选择媒体转述</button>` : ""}`;
   dialog.onclick = async e => {
+    if (e.target.closest("[data-manual-media]")) { await openMediaJob(result.media_job, scope); return; }
     const copy = e.target.closest("[data-copy-source]");
     if (copy) {
       const text = copy.dataset.copySource === "all" ? records.map(row => row.content).join("\n\n") : records.find(row => row.id === Number(copy.dataset.copySource))?.content || "";
@@ -113,4 +115,25 @@ export async function openRawEvent(id, scope, back = null) {
   };
   refreshIcons();
   dialog.querySelector(".source-selected")?.scrollIntoView({ block: "nearest" });
+}
+
+export async function openMediaJob(job, scope) {
+  const cfg = await safe("读取转述策略", () => bridge.apiGet("scope-config", scope));
+  if (!cfg) return false;
+  const dialog = $("confirm-dialog");
+  if (dialog.open) return false;
+  const choices = job.attachments || [];
+  dialog.innerHTML = `<form method="dialog"><h2 class="text-h3 pa-4 pb-0 pl-6">手动转述 #${job.id}</h2><p class="dialog-message">按当前策略执行，关闭、原生接管和预算限制仍生效。成功附件会复用；过期附件需重新发送。</p><p>图片模型：${esc(cfg.effective?.image_llm_provider || cfg.effective?.background_llm_provider || "当前会话模型")} · 音频模型：${esc(cfg.effective?.audio_llm_provider || cfg.effective?.background_llm_provider || "当前会话模型")}</p>${budgetCard(cfg.media_budget)}${choices.map(part => `<label class="media-choice"><input type="checkbox" name="attachment" value="${part.index}" ${part.index <= 4 ? "checked" : ""}> 媒体段 ${part.index} · ${part.kind === "image" ? "图片" : "音频"}</label>`).join("") || "来源需先展开；将处理符合策略的媒体。"}<p class="dialog-message">最多 ${cfg.effective?.media_max_requests ?? 4} 次插件请求；提交前会再次检查额度。</p><div class="dialog-actions"><button class="btn" value="cancel">取消</button><button class="btn primary" value="accept">加入处理队列</button></div></form>`;
+  dialog.querySelector("[data-review-budget]")?.remove();
+  dialog.querySelector("form").onsubmit = e => {
+    if (e.submitter?.value === "accept" && choices.length) { const n = dialog.querySelectorAll('input[name="attachment"]:checked').length; if (n < 1 || n > 4) { e.preventDefault(); toast("每次请选择 1 至 4 个附件", "err"); } }
+  };
+  dialog.returnValue = "cancel";
+  dialog.showModal();
+  const accepted = await new Promise(resolve => dialog.addEventListener("close", () => resolve(dialog.returnValue === "accept"), { once: true }));
+  if (!accepted) return false;
+  const attachments = [...dialog.querySelectorAll('input[name="attachment"]:checked')].map(el => Number(el.value));
+  const result = await safe("手动转述", () => bridge.apiPost("processing/retry", { ...scope, id: job.id, attachments }));
+  if (result !== null) { toast("已加入处理队列"); document.dispatchEvent(new Event("memoir:changed")); }
+  return result !== null;
 }

@@ -79,6 +79,12 @@ class MemoirPlugin(Star):
             f"{prefix}/processing", api.processing_status, ["GET"], "Processing status"
         )
         self.context.register_web_api(
+            f"{prefix}/media-budget/review",
+            api.review_media_budget,
+            ["POST"],
+            "Review unknown media usage without refunding quotas",
+        )
+        self.context.register_web_api(
             f"{prefix}/processing/retry",
             api.retry_processing,
             ["POST"],
@@ -177,7 +183,7 @@ class MemoirPlugin(Star):
 
     # ==================== 钩子 ====================
 
-    @filter.on_llm_request()
+    @filter.on_llm_request(priority=-100)
     async def on_llm_request(
         self, event: AstrMessageEvent, req: ProviderRequest
     ) -> None:
@@ -197,15 +203,17 @@ class MemoirPlugin(Star):
         except Exception as exc:
             logger.warning(f"[Memoir] 私聊捕获失败（不影响主流程）: {exc}")
 
-    @filter.custom_filter(PassiveGroupCaptureFilter, False)
+    @filter.custom_filter(PassiveGroupCaptureFilter, False, priority=-100)
     async def on_group_passive(self, event: AstrMessageEvent) -> None:
-        """Filter carrier only; this body never runs.
+        """Capture native STT text after preprocessing without requesting a reply.
 
-        PassiveGroupCaptureFilter performs the capture as a side effect
-        during the waking-check stage and always returns False, so this
-        handler is never activated. It exists solely so the filter gets
-        registered with the event bus.
+        Args:
+            event: Group event deferred by the passive filter when STT is on.
         """
+        if event.get_extra("memoir_native_stt"):
+            await self._dispatch_group_capture(
+                event, event.get_extra("memoir_capture_generation", 0)
+            )
 
     def submit_group_capture(self, event: AstrMessageEvent) -> None:
         """被动捕获的群消息：创建被跟踪的落库任务，terminate 时统一取消"""

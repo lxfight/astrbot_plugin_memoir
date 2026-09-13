@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from astrbot.api import logger
 from astrbot.api.message_components import Image, Record
 
+from .compatibility import native_policy
 from .forward_parser import ForwardExpander, snapshot_forward
 from .llm_helper import describe_multimedia
 from .scope import merge_scope_config
@@ -50,6 +51,10 @@ class MediaProcessor:
         forward = snapshot_forward(event)
         if forward:
             forward.update(
+                triggered=bool(
+                    getattr(event, "is_at_or_wake_command", False)
+                    or scope.scope_type == "private"
+                ),
                 umo=event.unified_msg_origin,
                 revision=await self.store.get_revision(
                     scope.scope_type, scope.scope_key
@@ -97,13 +102,45 @@ class MediaProcessor:
         ]
         if not parts:
             return
+        main_request = bool(
+            scope.scope_type == "private"
+            or getattr(event, "is_at_or_wake_command", False)
+            or event.get_extra("provider_request")
+        )
+        request = event.get_extra("provider_request")
+        if request is not None and getattr(request, "conversation", None) is None:
+            main_request = False
+        selected_provider = event.get_extra("selected_provider")
+        selected_provider = (
+            selected_provider if isinstance(selected_provider, str) else ""
+        )
+        native = await native_policy(
+            self.context,
+            self.config,
+            event.unified_msg_origin,
+            scope.scope_type,
+            check_request_image=main_request
+            and any(isinstance(part, Image) for part in parts),
+            provider_id=selected_provider,
+            message_text=event.message_str or "",
+        )
+        parts = [
+            part
+            for part in parts
+            if not (isinstance(part, Record) and native["audio"])
+            and not (
+                isinstance(part, Image)
+                and (
+                    native["group_image"] or (main_request and native["request_image"])
+                )
+            )
+        ]
+        if not parts:
+            return
         error = ""
-        if len(parts) > 4:
-            error = "At most four attachments can be analyzed per message; resend fewer attachments"
-            parts = []
         refs = []
         size = 0
-        for part in parts:
+        for part in parts[:32]:
             item = {"kind": "image" if isinstance(part, Image) else "audio"}
             for key in ("file", "url", "path"):
                 item[key] = getattr(part, key, None)
@@ -126,6 +163,8 @@ class MediaProcessor:
                     "user_text": user_text[:2000],
                     "assistant_text": assistant_text[:2000],
                     "umo": event.unified_msg_origin,
+                    "main_request": main_request,
+                    "selected_provider": selected_provider,
                     "revision": await self.store.get_revision(
                         scope.scope_type, scope.scope_key
                     ),
@@ -188,10 +227,43 @@ class MediaProcessor:
                     )
                     for p in payload["parts"]
                 ]
+                indices = {id(part): i for i, part in enumerate(parts, 1)}
+                main_request = payload.get("main_request", scope_type == "private")
+                native = await native_policy(
+                    self.context,
+                    effective,
+                    payload.get("umo"),
+                    scope_type,
+                    check_request_image=main_request
+                    and any(isinstance(part, Image) for part in parts),
+                    provider_id=payload.get("selected_provider", ""),
+                    message_text=payload.get("user_text", ""),
+                )
+                parts = [
+                    part
+                    for part in parts
+                    if not (isinstance(part, Record) and native["audio"])
+                    and not (
+                        isinstance(part, Image)
+                        and (
+                            native["group_image"]
+                            or (main_request and native["request_image"])
+                        )
+                    )
+                ]
                 event = SimpleNamespace(
                     message_obj=SimpleNamespace(message=parts),
                     message_str=payload["user_text"],
                     unified_msg_origin=payload["umo"],
+                    memoir_indices={
+                        i: indices[id(part)] for i, part in enumerate(parts, 1)
+                    },
+                    memoir_manual=payload.get("manual", False),
+                    memoir_triggered=main_request,
+                    memoir_selected=payload.get("selected", []),
+                    memoir_completed=payload.setdefault("completed", {}),
+                    memoir_completed_parts=payload.setdefault("completed_parts", {}),
+                    memoir_job_id=job["id"],
                 )
                 description = await asyncio.wait_for(
                     describe_multimedia(
@@ -208,6 +280,11 @@ class MediaProcessor:
                 problems.append("Media processing exceeded the 110-second deadline")
             except Exception as exc:
                 problems.append(f"Media processing failed: {type(exc).__name__}")
+        notes = [p for p in problems if p.startswith(("cached:", "reused:"))]
+        problems = [p for p in problems if p not in notes]
+        policy_only = bool(problems) and all(
+            p.startswith(("policy:", "budget:")) for p in problems
+        )
         async with store.transaction():
             cursor = await store.connection.execute(
                 "SELECT id FROM work_items WHERE id=?", (job["id"],)
@@ -252,9 +329,17 @@ class MediaProcessor:
             await store.connection.execute(
                 "UPDATE work_items SET status=?,error=?,payload=?,updated_at=? WHERE id=?",
                 (
-                    "failed" if problems else "complete",
-                    "; ".join(problems)[:300],
-                    job["payload"] if problems else "{}",
+                    (
+                        "paused"
+                        if any(p.startswith("budget:") for p in problems)
+                        else "skipped"
+                    )
+                    if policy_only
+                    else "failed"
+                    if problems
+                    else "complete",
+                    "; ".join(problems + notes)[:300],
+                    json.dumps(payload, ensure_ascii=False) if problems else "{}",
                     int(time.time()),
                     job["id"],
                 ),
@@ -287,6 +372,7 @@ class MediaProcessor:
             result.retryable = True
         else:
             await result.expand()
+            payload["available_parts"] = result.parts
             if result.parts:
                 issues = []
                 try:
@@ -304,6 +390,17 @@ class MediaProcessor:
                         message_obj=SimpleNamespace(message=parts),
                         message_str=mapping,
                         unified_msg_origin=payload["umo"],
+                        memoir_forward=True,
+                        memoir_manual=payload.get("manual", False),
+                        memoir_triggered=payload.get(
+                            "triggered", scope_type == "private"
+                        ),
+                        memoir_selected=payload.get("selected", []),
+                        memoir_completed=payload.setdefault("completed", {}),
+                        memoir_completed_parts=payload.setdefault(
+                            "completed_parts", {}
+                        ),
+                        memoir_job_id=job["id"],
                     )
                     description = await asyncio.wait_for(
                         describe_multimedia(
@@ -332,6 +429,8 @@ class MediaProcessor:
                     issues.append(
                         f"Forward media processing failed: {type(exc).__name__}"
                     )
+                notes = [i for i in issues if i.startswith(("cached:", "reused:"))]
+                issues = [i for i in issues if i not in notes]
                 result.problems.extend(issues)
                 result.retryable |= any(
                     not issue.startswith("Unsupported media:") for issue in issues
@@ -402,6 +501,16 @@ class MediaProcessor:
                 for offset in range(0, len(node["text"]), 1500):
                     chunk = f"{node['path']}:{offset // 1500}"
                     if chunk in existing:
+                        if node["path"] == "media":
+                            await store.connection.execute(
+                                "UPDATE raw_turns SET content=?,extracted=0 WHERE parent_id=? AND json_extract(source_meta,'$.chunk')=?",
+                                (
+                                    f"[转发引用 #{source['id']} 节点{node['path']}，署名未验证] "
+                                    + node["text"][offset : offset + 1500],
+                                    source["id"],
+                                    chunk,
+                                ),
+                            )
                         continue
                     origin = {k: v for k, v in node.items() if k != "text"}
                     origin.update(chunk=chunk, status=status)
@@ -432,7 +541,18 @@ class MediaProcessor:
             await store.connection.execute(
                 "UPDATE work_items SET status=?,error=?,payload=?,updated_at=? WHERE id=?",
                 (
-                    "failed" if result.problems else "complete",
+                    (
+                        "paused"
+                        if any(p.startswith("budget:") for p in result.problems)
+                        else "skipped"
+                    )
+                    if result.problems
+                    and all(
+                        p.startswith(("policy:", "budget:")) for p in result.problems
+                    )
+                    else "failed"
+                    if result.problems
+                    else "complete",
                     "; ".join(metadata["problems"])[:300],
                     json.dumps(payload, ensure_ascii=False)
                     if result.retryable

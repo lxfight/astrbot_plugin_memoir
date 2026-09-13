@@ -36,7 +36,7 @@ async function loadTab() {
     renderFilters();
     await (state.tab === "memories" ? loadMemories() : loadRaw());
   } else if (state.tab === "processing") {
-    $("filters").innerHTML = `<label>任务状态<select data-filter="task_status">${[["", "全部状态"], ["failed", "失败"], ["pending", "排队"], ["running", "处理中"], ["complete", "完成"]].map(([value, label]) => `<option value="${value}" ${state.filters.task_status === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>`;
+    $("filters").innerHTML = `<label>任务状态<select data-filter="task_status">${[["", "全部状态"], ["failed", "失败"], ["skipped", "策略跳过"], ["paused", "额度暂停"], ["pending", "排队"], ["running", "处理中"], ["complete", "完成"]].map(([value, label]) => `<option value="${value}" ${state.filters.task_status === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>`;
     await loadProcessingPage();
   } else if (state.tab === "usage") await loadUsage();
   else if (state.tab === "consents") await loadConsentPage();

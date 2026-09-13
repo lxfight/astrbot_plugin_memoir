@@ -1,4 +1,10 @@
 {
+  "auto_native_compatibility": {
+    "description": "自动兼容 AstrBot",
+    "type": "bool",
+    "default": true,
+    "hint": "按消息所属会话检测 AstrBot STT、图片转述及群聊上下文，自动停用对应的插件处理；原生失败不重复调用。模型选择保留，转发内部媒体仍由插件处理。"
+  },
   "background_llm_provider": {
     "description": "后台小模型",
     "type": "string",
@@ -133,5 +139,210 @@
     "type": "int",
     "default": 6000,
     "hint": "三层记忆合计字符预算（512–20000），超长原文按剩余预算截断；可按会话覆盖"
+  },
+  "image_mode": {
+    "description": "图片处理方式",
+    "type": "string",
+    "default": "auto",
+    "options": [
+      "auto",
+      "manual",
+      "off"
+    ]
+  },
+  "audio_mode": {
+    "description": "音频处理方式",
+    "type": "string",
+    "default": "auto",
+    "options": [
+      "auto",
+      "manual",
+      "off"
+    ]
+  },
+  "image_group_trigger": {
+    "description": "群聊图片范围",
+    "type": "string",
+    "default": "all",
+    "options": [
+      "all",
+      "reply"
+    ]
+  },
+  "audio_group_trigger": {
+    "description": "群聊音频范围",
+    "type": "string",
+    "default": "all",
+    "options": [
+      "all",
+      "reply"
+    ]
+  },
+  "image_forward_mode": {
+    "description": "转发图片",
+    "type": "string",
+    "default": "follow",
+    "options": [
+      "follow",
+      "manual",
+      "off"
+    ]
+  },
+  "audio_forward_mode": {
+    "description": "转发音频",
+    "type": "string",
+    "default": "follow",
+    "options": [
+      "follow",
+      "manual",
+      "off"
+    ]
+  },
+  "media_require_model": {
+    "description": "必须使用指定媒体模型",
+    "type": "bool",
+    "default": false
+  },
+  "image_max_count": {
+    "description": "每条消息图片上限",
+    "type": "int",
+    "default": 4
+  },
+  "audio_max_count": {
+    "description": "每条消息音频上限",
+    "type": "int",
+    "default": 4
+  },
+  "image_max_edge": {
+    "description": "图片最长边（像素，0 不缩放）",
+    "type": "int",
+    "default": 0
+  },
+  "image_max_mb": {
+    "description": "单张图片上限（MiB）",
+    "type": "int",
+    "default": 10
+  },
+  "audio_max_mb": {
+    "description": "单段音频上限（MiB）",
+    "type": "int",
+    "default": 10
+  },
+  "audio_max_seconds": {
+    "description": "音频时长上限（秒，0 不限）",
+    "type": "int",
+    "default": 0
+  },
+  "image_detail": {
+    "description": "图片转述方式",
+    "type": "string",
+    "default": "detailed",
+    "options": [
+      "brief",
+      "detailed"
+    ]
+  },
+  "audio_detail": {
+    "description": "音频转述方式",
+    "type": "string",
+    "default": "detailed",
+    "options": [
+      "brief",
+      "detailed"
+    ]
+  },
+  "media_text_chars": {
+    "description": "随附文字字符上限",
+    "type": "int",
+    "default": 2000
+  },
+  "media_output_tokens": {
+    "description": "输出长度目标（Token，仅提示词要求）",
+    "type": "int",
+    "default": 0,
+    "hint": "仅作为提示词中的长度要求，不修改供应商参数，不保证实际生成上限。"
+  },
+  "media_max_requests": {
+    "description": "每条消息请求上限",
+    "type": "int",
+    "default": 4
+  },
+  "media_timeout_seconds": {
+    "description": "单次请求超时（秒）",
+    "type": "int",
+    "default": 30
+  },
+  "media_cache_days": {
+    "description": "成功缓存天数（0 关闭）",
+    "type": "int",
+    "default": 0
+  },
+  "media_cache_entries": {
+    "description": "缓存容量（全插件条数）",
+    "type": "int",
+    "default": 1000
+  },
+  "media_daily_requests": {
+    "description": "每日多媒体请求上限",
+    "type": "int",
+    "default": 0,
+    "hint": "0 不限；全局为插件总额，会话覆盖为本会话额度，同时生效。只统计插件多媒体调用。"
+  },
+  "image_daily_requests": {
+    "description": "每日图片请求上限",
+    "type": "int",
+    "default": 0,
+    "hint": "0 不限；全局为插件总额，会话覆盖为本会话额度，同时生效。只统计插件多媒体调用。"
+  },
+  "audio_daily_requests": {
+    "description": "每日音频请求上限",
+    "type": "int",
+    "default": 0,
+    "hint": "0 不限；全局为插件总额，会话覆盖为本会话额度，同时生效。只统计插件多媒体调用。"
+  },
+  "image_daily_count": {
+    "description": "每日图片数量上限",
+    "type": "int",
+    "default": 0,
+    "hint": "0 不限；全局为插件总额，会话覆盖为本会话额度，同时生效。只统计插件多媒体调用。"
+  },
+  "audio_daily_seconds": {
+    "description": "每日音频秒数上限",
+    "type": "int",
+    "default": 0,
+    "hint": "0 不限；全局为插件总额，会话覆盖为本会话额度，同时生效。只统计插件多媒体调用。"
+  },
+  "media_daily_tokens": {
+    "description": "每日多媒体 Token 预算",
+    "type": "int",
+    "default": 0,
+    "hint": "0 不限；全局为插件总额，会话覆盖为本会话额度，同时生效。只统计插件多媒体调用。"
+  },
+  "image_daily_tokens": {
+    "description": "每日图片 Token 预算",
+    "type": "int",
+    "default": 0,
+    "hint": "0 不限；全局为插件总额，会话覆盖为本会话额度，同时生效。只统计插件多媒体调用。"
+  },
+  "audio_daily_tokens": {
+    "description": "每日音频 Token 预算",
+    "type": "int",
+    "default": 0,
+    "hint": "0 不限；全局为插件总额，会话覆盖为本会话额度，同时生效。只统计插件多媒体调用。"
+  },
+  "media_token_reserve": {
+    "description": "单次预占 Token（估算）",
+    "type": "int",
+    "default": 4096
+  },
+  "media_strict_budget": {
+    "description": "未知用量暂停后续调用",
+    "type": "bool",
+    "default": false
+  },
+  "media_day_offset": {
+    "description": "预算时区 UTC 偏移（分钟）",
+    "type": "int",
+    "default": 480
   }
 }

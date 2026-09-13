@@ -9,12 +9,15 @@ WebUI 后端接口：供插件 Pages（pages/memoir/）通过 bridge 调用。
 
 from __future__ import annotations
 
+import json
 import time
 import weakref
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api.web import error_response, json_response, request
 
+from .compatibility import native_policy
+from .media_policy import MEDIA_DEFAULTS, MEDIA_FIELDS, MEDIA_SCOPE_KEYS
 from .memory_recall import extract_terms
 from .scope import merge_scope_config
 from .storage import MemoryStore
@@ -27,6 +30,7 @@ _SEARCH_LIMIT = 50
 
 # ---- 配置白名单与默认值（WebUI 配置编辑的后端校验依据）----
 GLOBAL_CONFIG_KEYS = (
+    "auto_native_compatibility",
     "enable_private_memory",
     "enable_group_memory",
     "background_llm_provider",
@@ -50,6 +54,7 @@ GLOBAL_CONFIG_KEYS = (
     "group_capture_ignored_keywords",
 )
 GLOBAL_DEFAULTS = {
+    "auto_native_compatibility": True,
     "enable_private_memory": True,
     "enable_group_memory": True,
     "background_llm_provider": "",
@@ -104,12 +109,23 @@ _INT_KEYS = {
 _FLOAT_KEYS = {"decay_rate_semantic", "decay_rate_insight"}
 _LIST_KEYS = {"group_capture_ignored_users", "group_capture_ignored_keywords"}
 _BOOL_KEYS = {
+    "auto_native_compatibility",
     "enable_private_memory",
     "enable_group_memory",
     "enable_cross_scope_bridge",
     "enabled",
     "bridge_enabled",
 }
+
+GLOBAL_CONFIG_KEYS += tuple(MEDIA_FIELDS)
+GLOBAL_DEFAULTS.update(MEDIA_DEFAULTS)
+SCOPE_CONFIG_KEYS += MEDIA_SCOPE_KEYS
+GLOBAL_SELECTS.update(
+    {k: v[2] for k, v in MEDIA_FIELDS.items() if isinstance(v[2], tuple)}
+)
+SCOPE_SELECTS.update(GLOBAL_SELECTS)
+_INT_KEYS.update(k for k, v in MEDIA_FIELDS.items() if type(v[0]) is int)
+_BOOL_KEYS.update(k for k, v in MEDIA_FIELDS.items() if type(v[0]) is bool)
 
 
 def _validate_config_payload(
@@ -124,7 +140,18 @@ def _validate_config_payload(
             continue
         if value is None:
             continue
-        if key in _BOOL_KEYS:
+        if key in MEDIA_FIELDS and type(MEDIA_FIELDS[key][0]) is int:
+            lower = (
+                -720
+                if key == "media_day_offset"
+                else 1
+                if key in {"media_timeout_seconds", "media_token_reserve"}
+                else 0
+            )
+            if type(value) is not int or not lower <= value <= MEDIA_FIELDS[key][2]:
+                return None
+            cleaned[key] = value
+        elif key in _BOOL_KEYS:
             if not isinstance(value, bool):
                 return None
             cleaned[key] = value
@@ -262,6 +289,28 @@ class WebApi:
         result = await ctx[0].get_raw_event(
             request.query.get("id", 0, type=int), *scope
         )
+        if result:
+            async with ctx[0].transaction():
+                cursor = await ctx[0].connection.execute(
+                    "SELECT id,kind,status,payload FROM work_items WHERE raw_id=? AND scope_type=? AND scope_key=? AND kind IN ('media','forward') ORDER BY id DESC LIMIT 1",
+                    (result["root"]["id"], *scope),
+                )
+                row = await cursor.fetchone()
+                if row:
+                    job = dict(row)
+                    payload = json.loads(job.pop("payload"))
+                    job["retryable"] = job["status"] in {
+                        "failed",
+                        "paused",
+                        "skipped",
+                    } and payload.get("retryable", True)
+                    job["attachments"] = [
+                        {"index": i, "kind": p["kind"]}
+                        for i, p in enumerate(
+                            payload.get("parts", payload.get("available_parts", [])), 1
+                        )
+                    ]
+                    result["media_job"] = job
         return (
             json_response(result)
             if result
@@ -331,7 +380,34 @@ class WebApi:
         ctx, scope = self._ctx(), self._require_scope()
         if ctx is None or scope is None:
             return error_response("plugin or scope unavailable")
-        return json_response(await ctx[0].get_processing_status(*scope))
+        result = await ctx[0].get_processing_status(*scope)
+        result["media_budget"] = await ctx[0].media_gate.snapshot(
+            ctx[1],
+            scope,
+            merge_scope_config(ctx[1], await ctx[0].get_scope_config(*scope), scope[0]),
+        )
+        return json_response(result)
+
+    async def review_media_budget(self):
+        """Acknowledge unknown calls without refunding consumed allowances.
+
+        Returns:
+            Confirmation, or an error for malformed conversation identity.
+        """
+        ctx = self._ctx()
+        payload = await request.json(default={})
+        if ctx is None or not isinstance(payload, dict):
+            return error_response("plugin or payload unavailable")
+        scope = self._scope_from_payload(payload) if payload else None
+        if payload and scope is None:
+            return error_response("invalid scope")
+        async with ctx[0].transaction():
+            await ctx[0].connection.execute(
+                "UPDATE media_budget SET acknowledged=1 WHERE status IN ('unknown','interrupted')"
+                + (" AND scope_type=? AND scope_key=?" if scope else ""),
+                scope or (),
+            )
+        return json_response({"reviewed": True})
 
     async def retry_processing(self):
         """Requeue a failed job while respecting current memory switches."""
@@ -356,7 +432,14 @@ class WebApi:
                 or override.get("enabled") is False
             ):
                 return error_response("memory is disabled for this conversation")
-            if not await store.retry_work(work_id, *scope):
+            selected = payload.get("attachments", [])
+            if (
+                not isinstance(selected, list)
+                or len(selected) > 4
+                or any(type(i) is not int or not 1 <= i <= 32 for i in selected)
+            ):
+                return error_response("invalid attachment selection")
+            if not await store.retry_work(work_id, *scope, selected=selected):
                 return error_response(
                     "source expired, queue full, or task is not retryable"
                 )
@@ -574,6 +657,7 @@ class WebApi:
                     k: config.get(k, GLOBAL_DEFAULTS.get(k)) for k in GLOBAL_CONFIG_KEYS
                 },
                 "providers": providers,
+                "media_budget": await ctx[0].media_gate.snapshot(config),
             }
         )
 
@@ -618,6 +702,7 @@ class WebApi:
         merged = merge_scope_config(base, override, scope[0])
         effective = {k: merged.get(k) for k in SCOPE_CONFIG_KEYS}
         effective.update(
+            background_llm_provider=base.get("background_llm_provider", ""),
             enabled=base[f"enable_{scope[0]}_memory"]
             and merged.get("scope_enabled", True),
             bridge_enabled=base["enable_cross_scope_bridge"]
@@ -626,7 +711,23 @@ class WebApi:
                 f"consolidation_count_threshold_{scope[0]}"
             ],
         )
-        return json_response({"override": override, "effective": effective})
+        plugin = self._plugin_ref()
+        native = await native_policy(
+            getattr(plugin, "context", None),
+            config,
+            await store.get_umo(*scope),
+            scope[0],
+        )
+        if native["recent"]:
+            effective["recall_recent_turns"] = 0
+        return json_response(
+            {
+                "override": override,
+                "effective": effective,
+                "compatibility": native,
+                "media_budget": await store.media_gate.snapshot(config, scope, merged),
+            }
+        )
 
     async def update_scope_config(self):
         """更新会话配置覆盖；payload 的 override 为空对象时清除覆盖（完全继承全局）"""

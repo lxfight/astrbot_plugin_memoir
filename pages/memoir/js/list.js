@@ -6,7 +6,7 @@ export function renderFilters() {
   const raw = state.tab === "raw";
   const fields = [
     ["source", "来源", [["", "全部来源"], ["native", "普通对话"], ["forwarded", "转发引用"]]],
-    ...(raw ? [["status", "处理状态", [["", "全部状态"], ["pending", "解析排队"], ["running", "正在解析"], ["complete", "已完成"], ["partial", "部分解析"], ["failed", "处理失败"], ["unsupported", "暂不支持"], ["unextracted", "待巩固"]]]] : [
+    ...(raw ? [["status", "处理状态", [["", "全部状态"], ["pending", "解析排队"], ["running", "正在解析"], ["complete", "已完成"], ["partial", "部分解析"], ["failed", "处理失败"], ["skipped", "策略跳过"], ["paused", "额度暂停"], ["unsupported", "暂不支持"], ["unextracted", "待巩固"]]]] : [
       ["memory_type", "记忆类型", [["", "全部类型"], ["semantic", "认知"], ["insight", "洞察"]]],
       ["importance", "重要度", [["", "全部重要度"], ...[1,2,3,4,5].map(n => [String(n), `${n} 级`])]],
       ["sort", "排序", [["", "最近更新"], ["importance", "重要度优先"]]],

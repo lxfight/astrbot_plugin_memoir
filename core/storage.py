@@ -189,6 +189,9 @@ class MemoryStore:
         self.connection: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
         self._owner: asyncio.Task | None = None
+        from .media_policy import MediaGate
+
+        self.media_gate = MediaGate(self)
         self.config_revision = 0
         self.generations: dict[tuple[str, str], int] = {}
         # scope_configs 仅在 WebUI 编辑时变更，而捕获/召回路径每条消息都会读取，
@@ -225,7 +228,12 @@ class MemoryStore:
         self.connection.row_factory = aiosqlite.Row
         await self.connection.execute("PRAGMA journal_mode = WAL")
         await self.connection.execute("PRAGMA busy_timeout = 10000")
-        await self.connection.executescript(SCHEMA_SQL)
+        from .media_policy import MEDIA_SCHEMA
+
+        await self.connection.executescript(SCHEMA_SQL + MEDIA_SCHEMA)
+        await self.connection.execute(
+            "UPDATE media_budget SET status='interrupted' WHERE status='running'"
+        )
         await self.connection.execute(
             "UPDATE llm_usage SET status='interrupted' WHERE status='running'"
         )
@@ -799,10 +807,13 @@ class MemoryStore:
         return cursor.lastrowid
 
     @serialized
-    async def retry_work(self, work_id: int, scope_type: str, scope_key: str) -> bool:
+    async def retry_work(
+        self, work_id: int, scope_type: str, scope_key: str, *, selected=None
+    ) -> bool:
         """Requeue failed work only while its original source still exists.
 
         Args:
+            selected: Optional one-based attachment indices for manual processing.
             work_id: Failed work identifier.
             scope_type: Conversation type required to authorize this operation.
             scope_key: Conversation identifier required to authorize this operation.
@@ -811,7 +822,7 @@ class MemoryStore:
             Whether work was requeued.
         """
         cursor = await self.connection.execute(
-            "SELECT * FROM work_items WHERE id=? AND scope_type=? AND scope_key=? AND status='failed'",
+            "SELECT * FROM work_items WHERE id=? AND scope_type=? AND scope_key=? AND status IN ('failed','paused','skipped')",
             (work_id, scope_type, scope_key),
         )
         row = await cursor.fetchone()
@@ -835,6 +846,8 @@ class MemoryStore:
             if (await cursor.fetchone())[0] >= 32:
                 return False
             payload = json.loads(row["payload"])
+            payload["manual"] = True
+            payload["selected"] = selected or []
             payload["revision"] = await self.get_revision(scope_type, scope_key)
             await self.connection.execute(
                 "UPDATE work_items SET status='pending',error='',payload=?,updated_at=? WHERE id=?",
@@ -876,7 +889,7 @@ class MemoryStore:
         )
         oldest = (await cursor.fetchone())[0]
         cursor = await self.connection.execute(
-            "SELECT id,kind,status,error,attempts,created_at,updated_at,raw_ids,payload FROM work_items WHERE scope_type=? AND scope_key=? AND status='failed' ORDER BY id DESC LIMIT 100",
+            "SELECT id,kind,status,error,attempts,created_at,updated_at,raw_ids,payload FROM work_items WHERE scope_type=? AND scope_key=? AND status IN ('failed','paused','skipped') ORDER BY id DESC LIMIT 100",
             (scope_type, scope_key),
         )
         failures = [dict(row) for row in await cursor.fetchall()]
@@ -892,13 +905,20 @@ class MemoryStore:
                 and (await cursor.fetchone())[0] == len(ids)
             )
         cursor = await self.connection.execute(
-            "SELECT id,kind,status,error,attempts,created_at,updated_at,raw_id FROM work_items WHERE scope_type=? AND scope_key=? ORDER BY id DESC LIMIT 100",
+            "SELECT id,kind,status,error,attempts,created_at,updated_at,raw_id,payload FROM work_items WHERE scope_type=? AND scope_key=? ORDER BY id DESC LIMIT 100",
             (scope_type, scope_key),
         )
         jobs = [dict(row) for row in await cursor.fetchall()]
         retryable = {item["id"]: item["retryable"] for item in failures}
         for job in jobs:
             job["retryable"] = retryable.get(job["id"], False)
+            payload = json.loads(job.pop("payload"))
+            job["attachments"] = [
+                {"index": i, "kind": p["kind"]}
+                for i, p in enumerate(
+                    payload.get("parts", payload.get("available_parts", [])), 1
+                )
+            ]
         return {
             "items": jobs,
             "counts": counts,
@@ -1809,6 +1829,10 @@ class MemoryStore:
         if self.connection is None:
             return 0
         await self.bump_revision(scope_type, scope_key)
+        await self.connection.execute(
+            "DELETE FROM media_cache WHERE scope_type=? AND scope_key=?",
+            (scope_type, scope_key),
+        )
         await self.connection.execute(
             "DELETE FROM work_items WHERE scope_type=? AND scope_key=?",
             (scope_type, scope_key),

@@ -63,8 +63,8 @@ beforeEach(async () => {
           { id: 3, memory_type: "semantic", content: "正在学习摄影，最近关注自然光和户外人像的拍摄技巧。", tags: "摄影,自然光", importance: 3, strength: 0.72, updated_at: now - 7200 },
         ] };
         if (endpoint === "raw") return { total: 1, items: [{ id: 1, content: "用户: 今天带小福去了公园 [图片] [多媒体解析] 图片1：柴犬坐在树荫下的草地上。 / 助手: 看起来小福玩得很开心！", created_at: now, extracted: false }] };
-        if (endpoint === "scope-config") return { override: { recall_top_k: 2 } };
-        if (endpoint === "config") return { config: { recall_top_k: 9, background_llm_provider: "vision-model", enable_private_memory: true }, providers: ["vision-model", "audio-model"] };
+        if (endpoint === "scope-config") return { override: { recall_top_k: 2, recall_recent_turns: 5 }, effective: { recall_recent_turns: params.scope_type === "group" ? 0 : 5 }, compatibility: { enabled: true, detected: true, audio: true, group_image: params.scope_type === "group", request_image: params.scope_type !== "group", recent: params.scope_type === "group" } };
+        if (endpoint === "config") return { config: { auto_native_compatibility: true, recall_top_k: 9, background_llm_provider: "vision-model", enable_private_memory: true }, providers: ["vision-model", "audio-model"] };
         if (endpoint === "processing") return { counts: [{ kind: "media", status: "failed", count: 1 }], oldest_pending_seconds: 7200, failures: [{ id: 7, kind: "media", error: "Model timed out", attempts: 1, updated_at: now, retryable: true }] };
         if (endpoint === "memories/sources") return { items: [{ id: 3, content: "Original <script>unsafe()</script> text", speaker_name: "小张" }], tracked: true, expired: 1 };
         if (endpoint === "consents") return { items: [] };
@@ -159,6 +159,55 @@ test("usage dashboard renders at 1080p in both themes and fits mobile", async ()
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   if (output) await page.screenshot({ path: path.join(output, "usage-mobile.png"), fullPage: true });
+});
+
+test("native compatibility shows scope-specific ownership without erasing overrides", async () => {
+  await page.locator('[data-tab="settings"]').click();
+  assert.match(await page.locator(".native-compatibility").textContent(), /原生 STT 已开启，插件停用/);
+  assert.match(await page.locator(".native-compatibility").textContent(), /触发主对话时/);
+  await page.locator('[data-scope="group|test:周末摄影小组"]').click();
+  assert.match(await page.locator(".native-compatibility").textContent(), /原生群聊图片转述接管/);
+  const recent = page.locator(".field").filter({ has: page.locator("#scope-recall_recent_turns") });
+  assert.equal(await page.locator("#scope-recall_recent_turns").inputValue(), "5");
+  assert.match(await recent.textContent(), /当前生效：0 · 原生兼容策略/);
+  const output = process.env.MEMOIR_SCREENSHOT_DIR;
+  if (output) await fs.mkdir(output, { recursive: true });
+  for (const [label, theme] of [["浅色", "light"], ["深色", "dark"]]) {
+    await page.getByRole("radio", { name: label, exact: true }).check();
+    await page.waitForFunction(expected => document.documentElement.dataset.theme === expected, theme);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    if (output) await page.screenshot({ path: path.join(output, `native-${theme}.png`) });
+  }
+  await page.locator('[data-view="global"]').click();
+  assert.equal(await page.locator("#global-auto_native_compatibility").isChecked(), true);
+  const provider = await page.locator("#global-background_llm_provider").inputValue();
+  await page.locator("label.switch").filter({ has: page.locator("#global-auto_native_compatibility") }).click();
+  assert.equal(await page.locator("#global-auto_native_compatibility").isChecked(), false);
+  await page.locator("#save-global-cfg").click();
+  const request = await page.evaluate(() => window.savedRequests.at(-1));
+  assert.equal(request.payload.auto_native_compatibility, false);
+  assert.equal(request.payload.background_llm_provider, provider);
+  await page.locator('[data-scope="group|test:周末摄影小组"]').click();
+  await page.locator('[data-tab="settings"]').click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  if (output) await page.screenshot({ path: path.join(output, "native-mobile.png"), fullPage: true });
+});
+
+test("native compatibility marks missing detection and an explicitly disabled switch", async () => {
+  await page.evaluate(() => {
+    const apiGet = window.AstrBotPluginPage.apiGet;
+    window.AstrBotPluginPage.apiGet = async (endpoint, params) => {
+      const result = await apiGet(endpoint, params);
+      if (endpoint === "scope-config") result.compatibility = { enabled: !window.nativeDisabled, detected: false };
+      return result;
+    };
+  });
+  await page.locator('[data-tab="settings"]').click();
+  assert.match(await page.locator(".native-compatibility").textContent(), /暂时无法检测/);
+  await page.evaluate(() => { window.nativeDisabled = true; });
+  await page.locator("#refresh").click();
+  await page.waitForFunction(() => document.querySelector(".native-compatibility")?.textContent.includes("自动兼容已关闭"));
 });
 
 test("manual appearance survives host updates and reloads; auto tracks host", async () => {
@@ -271,8 +320,10 @@ test("source text is escaped and retries remain bound to the displayed scope", a
   await page.locator('#detail-dialog button').filter({ hasText: "关闭" }).click();
   await page.locator('[data-tab="processing"]').click();
   await page.locator('[data-retry-work="7"]').click();
+  await page.locator('#confirm-dialog button[value="accept"]').click();
+  await page.waitForFunction(() => window.savedRequests.some(r => r.endpoint === "processing/retry"));
   const saved = await page.evaluate(() => window.savedRequests.at(-1));
-  assert.deepEqual(saved, { endpoint: "processing/retry", payload: { id: 7, scope_type: "private", scope_key: "test:小张" } });
+  assert.deepEqual(saved, { endpoint: "processing/retry", payload: { id: 7, scope_type: "private", scope_key: "test:小张", attachments: [] } });
 });
 
 test("late memory results cannot overwrite another tab", async () => {
@@ -585,4 +636,55 @@ test("task polling stops on navigation and late task responses cannot replace th
   await page.locator('.mem').first().waitFor();
   await page.waitForTimeout(5200);
   assert.equal(await page.evaluate(() => window.processingCalls), 1);
+});
+
+test("media presets preserve budgets and model selections, render at 1080p and mobile", async () => {
+  await page.evaluate(() => {
+    const original = window.AstrBotPluginPage.apiGet;
+    window.AstrBotPluginPage.apiGet = async (endpoint, params) => {
+      const result = await original(endpoint, params);
+      if (endpoint === "config") {
+        result.config.image_llm_provider = "vision-model";
+        result.config.media_daily_requests = 30;
+        result.media_budget = { offset: 480, reset_at: Math.floor(Date.now()/1000)+3600, buckets: [{ scope: null, usage: [{kind: "image",requests: 8,images: 10,seconds: 0,tokens: 5400,unknown: 1}], limits: {media_daily_requests:30,media_daily_tokens:50000,image_daily_count:60,audio_daily_seconds:300}, unresolved:1 }], decisions:[{reason:"cache_hit",count:4}] };
+      }
+      return result;
+    };
+  });
+  await page.locator('[data-view="global"]').click();
+  await page.locator('[data-media-preset="saving"]').click();
+  assert.equal(await page.locator('#global-image_forward_mode').inputValue(), 'manual');
+  assert.equal(await page.locator('#global-media_daily_requests').inputValue(), '30');
+  assert.equal(await page.locator('#global-image_llm_provider').inputValue(), 'vision-model');
+  assert.match(await page.locator('.media-budget').textContent(), /剩余 22/);
+  assert.match(await page.locator('.media-budget').textContent(), /缓存复用 4 次/);
+  assert.match(await page.locator('.save-state').textContent(), /未保存/);
+  const output = process.env.MEMOIR_SCREENSHOT_DIR;
+  for (const [label, theme] of [["浅色","light"],["深色","dark"]]) {
+    await page.getByRole("radio", {name:label,exact:true}).check();
+    await page.locator('[data-media-preset="saving"]').scrollIntoViewIfNeeded();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    if (output) await page.screenshot({path:path.join(output,`cost-${theme}.png`)});
+  }
+  await page.setViewportSize({width:390,height:844});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  if (output) await page.screenshot({path:path.join(output,'cost-mobile.png')});
+  await page.locator('#save-global-cfg').click();
+  const saved = await page.evaluate(() => window.savedRequests.at(-1));
+  assert.equal(saved.payload.media_cache_days,7);
+  assert.equal(saved.payload.media_daily_requests,30);
+  assert.equal(saved.payload.image_llm_provider,'vision-model');
+});
+
+test("manual media preview submits only checked attachments and keeps its scope", async () => {
+  await page.evaluate(() => {
+    const original = window.AstrBotPluginPage.apiGet;
+    window.AstrBotPluginPage.apiGet = async (endpoint, params) => endpoint === 'processing' ? {counts:[],oldest_pending_seconds:0,items:[{id:12,kind:'media',status:'skipped',error:'policy: manual only',retryable:true,attachments:[{index:1,kind:'image'},{index:2,kind:'audio'}]}]} : original(endpoint,params);
+  });
+  await page.locator('[data-tab="processing"]').click();
+  await page.locator('[data-retry-work="12"]').click();
+  await page.locator('#confirm-dialog input[value="1"]').uncheck();
+  await page.locator('#confirm-dialog button[value="accept"]').click();
+  await page.waitForFunction(() => window.savedRequests.some(r => r.endpoint === 'processing/retry'));
+  assert.deepEqual(await page.evaluate(() => window.savedRequests.at(-1)), {endpoint:'processing/retry',payload:{id:12,scope_type:'private',scope_key:'test:小张',attachments:[2]}});
 });

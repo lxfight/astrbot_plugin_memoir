@@ -1,18 +1,20 @@
+import { MEDIA_FIELDS, MEDIA_DEFAULTS, MEDIA_LABELS, MEDIA_BASIC, MEDIA_PRESETS, budgetCard } from "./media-settings.js";
 import { $, beginLoad, RETRY_LOADERS, state } from "./state.js";
 import { esc, errorPanel, refreshIcons, skeleton, timeAgo, toast } from "./utils.js";
 import { bridge, safe } from "./api.js";
-import { ask, markSaved } from "./dialogs.js";
+import { ask, markSaved, openMediaJob } from "./dialogs.js";
 
 /* ---------- config forms ---------- */
 const GLOBAL_FIELDS = [
   {
     section: "基础",
     items: [
+      { key: "auto_native_compatibility", label: "自动兼容 AstrBot", type: "switch", hint: "默认开启，原生 STT、图片转述、群聊上下文接管时停用对应插件处理；在会话设置查看生效状态。原有模型选择保留，转发内部媒体照常解析" },
       { key: "enable_private_memory", label: "启用私聊记忆", type: "switch", hint: "默认开启，保存用户与助手的私聊轮次。关闭后停止捕获、召回与巩固，已有数据需单独清空" },
       { key: "enable_group_memory", label: "启用群聊记忆", type: "switch", hint: "默认开启：会被动记录机器人收到的群消息，无需 @ 或触发回复；指令和忽略规则仍生效。后台巩固会把原文发送给所选模型。关闭后停止捕获、召回与巩固，已有数据需单独清空" },
       { key: "background_llm_provider", label: "后台小模型", type: "provider", hint: "用于记忆巩固及未单独指定的媒体处理；留空使用当前会话模型。实际调用及重试记录在用量统计中" },
-      { key: "image_llm_provider", label: "图片处理模型", type: "provider", fallback: "继承后台模型", hint: "选择 AstrBot 中支持 image 输入的模型，描述图片与识别文字" },
-      { key: "audio_llm_provider", label: "音频处理模型", type: "provider", fallback: "继承后台模型", hint: "选择支持 audio 输入的聊天模型，转写音频。留空继承后台模型，再回退当前会话模型" },
+      { key: "image_llm_provider", label: "图片处理模型", type: "provider", fallback: "继承后台模型", hint: "选择支持 image 输入的模型；原生图片转述接管时停用对应消息的解析，仍用于转发内部图片" },
+      { key: "audio_llm_provider", label: "音频处理模型", type: "provider", fallback: "继承后台模型", hint: "选择支持 audio 输入的聊天模型；原生 STT 开启时停用普通音频解析，仍用于转发内部音频。留空继承后台模型，再回退当前会话模型" },
     ],
   },
   {
@@ -57,17 +59,20 @@ const SCOPE_FIELDS = [
   { key: "bridge_max_sensitivity", label: "敏感度上限", type: "inherit-select", options: ["low", "medium", "high"], groupOnly: true },
 ];
 
-function fieldRow(f, value, inheritValue, inheritable, effectiveValue) {
+GLOBAL_FIELDS.splice(1, 0, { section: "多媒体与成本", items: MEDIA_FIELDS });
+SCOPE_FIELDS.push(...MEDIA_FIELDS.filter(f => !["media_day_offset", "media_cache_entries"].includes(f.key)).map(f => ({ ...f, type: f.type === "switch" ? "inherit-switch" : f.type === "select" ? "inherit-select" : "inherit-number" })), ...["image", "audio"].map(kind => ({ key: `${kind}_llm_provider`, label: `${kind === "image" ? "图片" : "音频"}处理模型`, type: "inherit-provider" })));
+
+function fieldRow(f, value, inheritValue, inheritable, effectiveValue, effectiveSource) {
   const hint = f.hint ? `<div class="f-hint">${esc(f.hint)}</div>` : "";
   let control = "";
   if (!inheritable) {
     if (f.type === "switch") {
       control = `<label class="switch"><input type="checkbox" data-cfg="${f.key}" ${value ? "checked" : ""} /><span class="slider"></span></label>`;
     } else if (f.type === "select" || f.type === "provider") {
-      const opts = (f.type === "provider" ? state.providers : f.options) || [];
+      const opts = (f.type === "provider" ? [...new Set([...state.providers, ...(value ? [value] : [])])] : f.options) || [];
       control = `<select class="f-input" data-cfg="${f.key}">${
         f.type === "provider" ? `<option value="">（${f.fallback || "使用当前对话模型"}）</option>` : ""
-      }${opts.map((o) => `<option value="${esc(o)}" ${value === o ? "selected" : ""}>${esc(f.type === "provider" ? o : { low: "low 仅日常事实", medium: "medium 含一般隐私", high: "high 不限制" }[o] || o)}</option>`).join("")}</select>`;
+      }${opts.map((o) => `<option value="${esc(o)}" ${value === o ? "selected" : ""}>${esc(f.type === "provider" ? o : { low: "low 仅日常事实", medium: "medium 含一般隐私", high: "high 不限制" }[o] || MEDIA_LABELS[o] || o)}</option>`).join("")}</select>`;
     } else {
       control = `<input type="number" class="f-input" data-cfg="${f.key}" value="${value ?? ""}" step="${f.type === "float" ? "0.01" : "1"}" min="${f.min ?? 0}" max="${f.max ?? (f.type === "float" ? 1 : 100000)}" />`;
     }
@@ -81,16 +86,16 @@ function fieldRow(f, value, inheritValue, inheritable, effectiveValue) {
       ];
       const cur = value === undefined || value === null ? "" : String(value);
       control = `<select class="f-input" data-cfg="${f.key}">${opts.map(([v, t]) => `<option value="${v}" ${cur === v ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>`;
-    } else if (f.type === "inherit-select") {
-      const opts = ["", ...f.options];
-      control = `<select class="f-input" data-cfg="${f.key}">${opts.map((o) => `<option value="${o}" ${value === o || (value === undefined && o === "") ? "selected" : ""}>${o === "" ? `跟随全局（当前：${esc(inheritValue)}）` : esc(o)}</option>`).join("")}</select>`;
+    } else if (["inherit-select", "inherit-provider"].includes(f.type)) {
+      const opts = ["", ...(f.type === "inherit-provider" ? [...new Set([...state.providers, ...(value ? [value] : [])])] : f.options)];
+      control = `<select class="f-input" data-cfg="${f.key}">${opts.map((o) => `<option value="${o}" ${value === o || (value === undefined && o === "") ? "selected" : ""}>${o === "" ? `跟随全局（当前：${esc(inheritValue)}）` : esc(MEDIA_LABELS[o] || o)}</option>`).join("")}</select>`;
     } else {
-      control = `<input type="number" class="f-input" data-cfg="${f.key}" value="${value ?? ""}" min="${f.key === "recall_max_chars" ? 512 : 0}" max="${f.key === "recall_max_chars" ? 20000 : 1000}" placeholder="${inheritValue ?? "继承全局"}" />`;
+      control = `<input type="number" class="f-input" data-cfg="${f.key}" value="${value ?? ""}" min="${f.min ?? (f.key === "recall_max_chars" ? 512 : 0)}" max="${f.max ?? (f.key === "recall_max_chars" ? 20000 : 1000)}" placeholder="${inheritValue ?? "继承全局"}" />`;
     }
   }
   const id = `${inheritable ? "scope" : "global"}-${f.key}`;
   control = control.replace(/<(input|select) /, `<$1 id="${id}" `);
-  return `<div class="field"><div style="flex:1;min-width:0"><label class="f-label" for="${id}">${esc(f.label)}</label>${hint}${inheritable ? `<div class="effective-value">当前生效：${esc(typeof effectiveValue === "boolean" ? (effectiveValue ? "开启" : "关闭") : effectiveValue ?? inheritValue ?? "默认")} · ${value === undefined ? "来自全局" : "会话覆盖"}</div>` : ""}</div>${control}</div>`;
+  return `<div class="field"><div style="flex:1;min-width:0"><label class="f-label" for="${id}">${esc(f.label)}</label>${hint}${inheritable ? `<div class="effective-value">当前生效：${esc(typeof effectiveValue === "boolean" ? (effectiveValue ? "开启" : "关闭") : effectiveValue ?? inheritValue ?? "默认")} · ${esc(effectiveSource || (value === undefined ? "来自全局" : "会话覆盖"))}</div>` : ""}</div>${control}</div>`;
 }
 
 export async function loadScopeConfigTab() {
@@ -104,23 +109,45 @@ export async function loadScopeConfigTab() {
   if (!request.current()) return;
   if (!cfgRes || !gRes) { $("content").innerHTML = errorPanel("配置", "请求失败，请重试", "settings"); refreshIcons(); return; }
   state.scopeOverride = cfgRes.override || {};
-  state.globalConfig = gRes.config || {};
+  state.globalConfig = { ...MEDIA_DEFAULTS, ...(gRes.config || {}) };
   state.providers = gRes.providers || [];
   const ov = state.scopeOverride, g = state.globalConfig;
   if (global) {
-    const rows = GLOBAL_FIELDS.map(section => `<section><h3>${esc(section.section)}</h3>${section.items.map(f => fieldRow(f, g[f.key], null, false)).join("")}</section>`).join("");
-    $("content").innerHTML = `<form class="form-card" id="global-config-form"><h2>全局默认配置</h2><p class="form-sub">未覆盖的会话继承这里的设置；私聊和群聊总开关优先于会话设置。关闭不会清除历史数据。</p>${rows}<div class="form-actions sticky-save"><span class="save-state"></span><button class="btn primary" id="save-global-cfg" type="submit">保存全局配置</button></div></form>`;
+    const rows = GLOBAL_FIELDS.map(section => `<section><h3>${esc(section.section)}</h3>${section.section === "多媒体与成本" ? `<p class="form-sub">预设只填充表单，保存后生效；不会修改模型和已设置预算。</p><div class="media-presets">${[["current","沿用当前"],["saving","节省"],["manual","仅手动"]].map(([key,label]) => `<button class="btn" type="button" data-media-preset="${key}">${label}</button>`).join("")}</div>${section.items.filter(f => MEDIA_BASIC.has(f.key)).map(f => fieldRow(f, g[f.key], null, false)).join("")}<details class="media-advanced"><summary>高级：输入、缓存、独立预算和长度要求</summary>${section.items.filter(f => !MEDIA_BASIC.has(f.key)).map(f => fieldRow(f, g[f.key], null, false)).join("")}</details>` : section.items.map(f => fieldRow(f, g[f.key], null, false)).join("")}</section>`).join("");
+    $("content").innerHTML = `<form class="form-card" id="global-config-form"><h2>全局默认配置</h2><p class="form-sub">未覆盖的会话继承这里的设置；私聊和群聊总开关优先于会话设置。关闭不会清除历史数据。</p>${budgetCard(gRes.media_budget)}${rows}<div class="form-actions sticky-save"><span class="save-state"></span><button class="btn primary" id="save-global-cfg" type="submit">保存全局配置</button></div></form>`;
     const form = $("global-config-form"); markSaved(form); form.onsubmit = e => { e.preventDefault(); saveGlobalConfig(); };
   } else {
     const isGroup = request.scope.scope_type === "group";
+    const native = cfgRes.compatibility;
+    const nativeRows = native?.enabled && native.detected ? [
+      ["普通音频解析", native.audio ? "原生 STT 已开启，插件停用" : "由插件配置决定"],
+      ["普通图片解析", native.group_image ? "原生群聊图片转述接管，插件停用" : native.request_image ? "触发主对话时由原生转述接管，插件停用" : "由插件配置决定"],
+      ...(isGroup ? [["群聊近因原文", native.recent ? "原生群聊上下文已开启，插件停用" : "由插件配置决定"]] : []),
+    ] : [];
+    const compatibility = `<section class="native-compatibility" aria-label="AstrBot 兼容状态"><h3>AstrBot 兼容状态</h3>${nativeRows.map(([name, value]) => `<div class="native-policy-row"><span>${esc(name)}</span><strong>${esc(value)}</strong></div>`).join("") || `<p>${!native ? "当前版本未提供检测结果" : !native.enabled ? "自动兼容已关闭，使用插件自身配置" : "暂时无法检测该会话配置；产生新消息后刷新。当前保留插件处理"}</p>`}<p class="f-hint">${native?.enabled && native.detected ? "按最近记录的 AstrBot 会话配置预览；运行时逐条判断。原生处理失败不再调用插件模型，模型选择仍保留。转发内部媒体由插件处理。" : "自动兼容开关位于全局设置。"}</p></section>`;
     const fields = SCOPE_FIELDS.filter(f => isGroup || !f.groupOnly);
-    const rows = fields.map(f => {
+    const rows = fields.map((f, index) => {
       const baseKey = f.key === "enabled" ? `enable_${request.scope.scope_type}_memory` : f.key === "bridge_enabled" ? "enable_cross_scope_bridge" : f.key === "consolidation_count_threshold" ? `consolidation_count_threshold_${request.scope.scope_type}` : f.key;
-      return fieldRow(f, ov[f.key], g[baseKey], true, cfgRes.effective?.[f.key] ?? ov[f.key] ?? g[baseKey]);
+      return (f.key === "image_mode" ? '<details class="media-advanced"><summary>多媒体与成本：本会话覆盖</summary>' : "") + fieldRow(f, ov[f.key], g[baseKey], true, cfgRes.effective?.[f.key] ?? ov[f.key] ?? g[baseKey], native?.recent && f.key === "recall_recent_turns" ? "原生兼容策略" : null) + (index === fields.length - 1 ? "</details>" : "");
     }).join("");
-    $("content").innerHTML = `<form class="form-card" id="scope-config-form" data-scope-type="${esc(request.scope.scope_type)}" data-scope-key="${esc(request.scope.scope_key)}"><h2>当前会话设置</h2><p class="form-sub">留空或选择「跟随全局」恢复继承。保存后更新实际生效值。</p>${g[`enable_${request.scope.scope_type}_memory`] === false ? '<p class="config-notice">全局类型开关已关闭，本会话开关无法单独开启记忆。</p>' : ""}${rows}<div class="form-actions sticky-save"><span class="save-state"></span><button class="btn" id="reset-scope-cfg" type="button">恢复继承</button><button class="btn primary" id="save-scope-cfg" type="submit">保存会话设置</button></div></form>`;
+    $("content").innerHTML = `<form class="form-card" id="scope-config-form" data-scope-type="${esc(request.scope.scope_type)}" data-scope-key="${esc(request.scope.scope_key)}"><h2>当前会话设置</h2><p class="form-sub">留空或选择「跟随全局」恢复继承。保存后更新实际生效值。</p>${g[`enable_${request.scope.scope_type}_memory`] === false ? '<p class="config-notice">全局类型开关已关闭，本会话开关无法单独开启记忆。</p>' : ""}${compatibility}${budgetCard(cfgRes.media_budget)}${rows}<div class="form-actions sticky-save"><span class="save-state"></span><button class="btn" id="reset-scope-cfg" type="button">恢复继承</button><button class="btn primary" id="save-scope-cfg" type="submit">保存会话设置</button></div></form>`;
     const form = $("scope-config-form"); markSaved(form); form.onsubmit = e => { e.preventDefault(); saveScopeConfig(); };
   }
+  document.querySelectorAll("[data-media-preset]").forEach(button => { button.onclick = () => {
+    const preset = button.dataset.mediaPreset === "current" ? Object.fromEntries(MEDIA_FIELDS.map(f => [f.key,g[f.key]])) : MEDIA_PRESETS[button.dataset.mediaPreset];
+    for (const [key, value] of Object.entries(preset)) {
+      if (key.includes("daily") || ["media_day_offset", "media_strict_budget"].includes(key)) continue;
+      const el = document.querySelector(`#global-config-form [data-cfg="${key}"]`);
+      if (!el) continue;
+      if (el.type === "checkbox") el.checked = value; else el.value = value;
+    }
+    $("global-config-form").dispatchEvent(new Event("input")); toast("预设已填入，保存后生效");
+  }; });
+  document.querySelectorAll("[data-review-budget]").forEach(button => { button.onclick = async () => {
+    if (!await ask("解除未知用量暂停？", "仅标记未知调用已核对，不返还预占 Token 或请求额度。仍遵守全部预算。", "已核对")) return;
+    const result = await safe("核对预算", () => bridge.apiPost("media-budget/review", global ? {} : request.scope));
+    if (result !== null) { toast("已核对；预占额度保留"); await loadScopeConfigTab(); }
+  }; });
   refreshIcons();
 }
 
@@ -131,7 +158,7 @@ function collectScopeOverride() {
     if (!el) continue;
     if (f.type === "inherit-switch") {
       if (el.value !== "") override[f.key] = el.value === "true";
-    } else if (f.type === "inherit-select") {
+    } else if (["inherit-select", "inherit-provider"].includes(f.type)) {
       if (el.value !== "") override[f.key] = el.value;
     } else if (f.type === "inherit-number") {
       if (el.value !== "") override[f.key] = Number(el.value);
@@ -236,20 +263,25 @@ export async function loadProcessingStatus(force = false) {
   const result = await safe("加载处理状态", () => bridge.apiGet("processing", scope), { silent: true });
   if (!box.isConnected || version !== state.loadVersion || Number(box.dataset.request) !== requestId) return;
   if (!result) { box.innerHTML = errorPanel("处理状态", "请求失败，请重试", "processing"); refreshIcons(); return; }
-  const names = { pending: "排队", running: "处理中", failed: "失败", complete: "完成" };
+  const names = { skipped: "策略跳过", paused: "额度暂停", pending: "排队", running: "处理中", failed: "失败", complete: "完成" };
   const kinds = { media: "媒体解析", forward: "转发解析", consolidation: "记忆巩固" };
   const jobs = (result.items || result.failures).filter(job => !state.filters.task_status || job.status === state.filters.task_status);
-  box.innerHTML = `<div class="form-title">处理任务<button class="btn" id="refresh-processing">刷新</button></div><p class="form-sub">最早待巩固原文：${Math.floor(result.oldest_pending_seconds / 60)} 分钟 · 最近 100 条任务；有活动任务时每 5 秒刷新</p><div class="processing-counts">${result.counts.map(c => `<span class="subject-chip">${kinds[c.kind] || c.kind} · ${names[c.status] || c.status} ${c.count}</span>`).join("") || "暂无任务"}</div>${jobs.map(job => {
+  box.innerHTML = `<div class="form-title">处理任务<button class="btn" id="refresh-processing">刷新</button></div><p class="form-sub">最早待巩固原文：${Math.floor(result.oldest_pending_seconds / 60)} 分钟 · 最近 100 条任务；有活动任务时每 5 秒刷新</p>${budgetCard(result.media_budget)}<div class="processing-counts">${result.counts.map(c => `<span class="subject-chip">${kinds[c.kind] || c.kind} · ${names[c.status] || c.status} ${c.count}</span>`).join("") || "暂无任务"}</div>${jobs.map(job => {
     const error = String(job.error || "");
     let advice = "请检查模型或适配器设置；不可重试时请重新发送原消息。";
-    if (/timeout|deadline|exceeded.*seconds/i.test(error)) advice = "处理超时，请检查网络或模型服务后重试。";
+    if (/^(cached|reused):/i.test(error)) advice = "已复用成功转述，本次未重复调用对应模型。";
+    else if (/^policy:/i.test(error)) advice = "按多媒体策略跳过，手动处理仍遵守关闭开关和额度限制。";
+    else if (/^budget:/i.test(error)) advice = "达到预算或有未知用量；核对设置后手动重试，不会跨日自动补跑。";
+    else if (/timeout|deadline|exceeded.*seconds/i.test(error)) advice = "处理超时，请检查网络或模型服务后重试。";
     else if (/unsupported|capabilit|preview/i.test(error)) advice = "模型能力不足或平台只提供预览。调整模型能力或重新发送正文。";
     else if (/budget|limit|MiB|truncated/i.test(error)) advice = "内容超过处理限制，请拆分消息或缩小附件。";
     else if (/changed|disabled/i.test(error)) advice = "会话设置已变化，请确认记忆开关后重试。";
     else if (/instance|fetch|unavailable/i.test(error)) advice = "暂时无法获取来源，请检查原适配器实例和消息是否仍可访问。";
-    return `<article class="processing-failure"><div><strong>${esc(kinds[job.kind] || job.kind)} #${job.id}</strong><span class="status-chip">${esc(names[job.status] || "失败")}</span>${error ? `<p class="task-advice">${advice}</p><details><summary>查看原始原因</summary><p>${esc(error)}</p></details>` : ""}<small>尝试 ${job.attempts} 次 · ${timeAgo(job.updated_at)}</small></div><div>${job.raw_id ? `<button class="btn" data-open-event="${job.raw_id}">查看来源</button>` : ""}${job.status === "failed" || job.retryable ? `<button class="btn" data-retry-work="${job.id}" data-scope-type="${esc(scope.scope_type)}" data-scope-key="${esc(scope.scope_key)}" ${job.retryable ? "" : "disabled"}>${job.retryable ? "重试" : "不可重试"}</button>` : ""}</div></article>`;
+    return `<article class="processing-failure"><div><strong>${esc(kinds[job.kind] || job.kind)} #${job.id}</strong><span class="status-chip">${esc(names[job.status] || "失败")}</span>${error ? `<p class="task-advice">${advice}</p><details><summary>查看原始原因</summary><p>${esc(error)}</p></details>` : ""}<small>尝试 ${job.attempts} 次 · ${timeAgo(job.updated_at)}</small></div><div>${job.raw_id ? `<button class="btn" data-open-event="${job.raw_id}">查看来源</button>` : ""}${job.status === "failed" || job.retryable ? `<button class="btn" data-retry-work="${job.id}" data-media-kind="${job.kind}" data-scope-type="${esc(scope.scope_type)}" data-scope-key="${esc(scope.scope_key)}" ${job.retryable ? "" : "disabled"}>${job.retryable ? "重试" : "不可重试"}</button>` : ""}</div></article>`;
   }).join("") || '<p class="form-sub">没有符合筛选条件的任务</p>'}`;
   refreshIcons();
+  box.querySelectorAll('[data-media-kind="media"], [data-media-kind="forward"]').forEach(button => { button.onclick = async e => { e.stopPropagation(); const job = jobs.find(j => j.id === Number(button.dataset.retryWork)); if (await openMediaJob(job, scope)) loadProcessingStatus(true); }; });
+  box.querySelector("[data-review-budget]")?.remove();
   if (result.counts.some(c => ["pending", "running"].includes(c.status) && c.count)) processingTimer = setTimeout(() => loadProcessingStatus(), 5000);
 }
 export function loadProcessingPage() {

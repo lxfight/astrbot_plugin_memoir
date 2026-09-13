@@ -737,7 +737,7 @@ async def run_forgetting_pass(config: dict, store: MemoryStore) -> int:
     )
     async with store.transaction():
         await store.connection.execute(
-            "DELETE FROM work_items WHERE status IN ('complete','failed') AND updated_at < ?",
+            "DELETE FROM work_items WHERE status IN ('complete','failed','paused','skipped') AND updated_at < ?",
             (int(time.time()) - 30 * 86400,),
         )
         await store.connection.execute(

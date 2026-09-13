@@ -1,13 +1,9 @@
-"""
-被动群消息捕获过滤器。
+"""Capture groups passively, deferring direct voice capture until native STT.
 
-AstrBot 没有提供"监听所有群消息但不唤醒机器人"的标准接口：
-普通的 @filter.event_message_type 监听器一旦 filter 通过，WakingCheckStage 就会把
-is_wake 置为 True，导致每条群消息都触发机器人回复/LLM 调用。
-
-这里的做法是借助 custom_filter：filter() 在唤醒检查阶段被调用，可以执行捕获副作用，
-但返回 False 让该 handler 不进入激活列表，从而不唤醒机器人——模拟
-"身处嘈杂房间时背景感知仍在运作，但不会对每句话都回应"。
+Most messages are captured by a background task without activating a handler.
+With native STT enabled, voice activates the capture-only handler so it sees
+post-preprocessing text. The handler never sets is_at_or_wake_command or calls
+an agent, and ProcessStage does not request a reply for ordinary group speech.
 """
 
 from __future__ import annotations
@@ -15,6 +11,7 @@ from __future__ import annotations
 import weakref
 from typing import Any
 
+from astrbot.api.message_components import Record
 from astrbot.core.config import AstrBotConfig
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.message_type import MessageType
@@ -49,13 +46,31 @@ class PassiveGroupCaptureFilter(CustomFilter):
         super().__init__(raise_error=raise_error)
 
     def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
-        # 非 @机器人 或非唤醒前缀的普通群消息也要捕获；
-        # 但这条 handler 不该被激活去回复，始终返回 False。
+        # Capture ordinary group messages without requesting a main-agent reply.
         if event.get_message_type() != MessageType.GROUP_MESSAGE:
             return False
         plugin = _get_active_plugin()
         if plugin is None:
             return False
+        stt_settings = cfg.get("provider_stt_settings")
+        if (
+            plugin.config.get("auto_native_compatibility", True)
+            and plugin.config.get("enable_group_memory", True)
+            and isinstance(stt_settings, dict)
+            and stt_settings.get("enable", False)
+            and any(isinstance(part, Record) for part in event.get_messages())
+        ):
+            # A normal handler runs after native preprocessing. It never sets
+            # is_at_or_wake_command, calls an LLM or returns a reply.
+            from .scope import resolve_scope
+
+            scope = resolve_scope(event)
+            event.set_extra("memoir_native_stt", True)
+            event.set_extra(
+                "memoir_capture_generation",
+                plugin.store.generations.get((scope.scope_type, scope.scope_key), 0),
+            )
+            return True
         # 任务由插件创建并跟踪，terminate 时统一取消
         plugin.submit_group_capture(event)
         return False

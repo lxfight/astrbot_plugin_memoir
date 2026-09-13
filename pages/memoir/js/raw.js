@@ -1,7 +1,7 @@
 import { state } from "./state.js";
 import { esc, fmtTime, dayLabel, longText } from "./utils.js";
 
-const statusNames = { pending: "解析排队", running: "正在解析", complete: "已完成", partial: "部分解析", unsupported: "暂不支持", failed: "处理失败", unextracted: "待巩固" };
+const statusNames = { skipped: "策略跳过", paused: "额度暂停", pending: "解析排队", running: "正在解析", complete: "已完成", partial: "部分解析", unsupported: "暂不支持", failed: "处理失败", unextracted: "待巩固" };
 export function renderRawEvent(row, previousDay) {
   const label = dayLabel(row.created_at);
   const divider = label === previousDay ? "" : `<div class="day-chip">${esc(label)}</div>`;

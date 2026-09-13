@@ -13,7 +13,7 @@ by a bounded background queue; decisions about lasting memories remain in consol
 from __future__ import annotations
 
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.message_components import File, Image, Record, Video
+from astrbot.api.message_components import File, Image, Plain, Record, Video
 from astrbot.api.provider import LLMResponse
 
 from .forward_parser import snapshot_forward
@@ -38,6 +38,10 @@ def _capture_text(event: AstrMessageEvent) -> str:
         return "[转发消息：后台解析中，内容不代表转发者本人陈述]"
     text = (event.message_str or "").strip()
     chain = getattr(event.message_obj, "message", None) or []
+    if event.get_extra("memoir_native_stt"):
+        # Native STT also appends reply transcripts to message_str. Capture
+        # direct components only so quoted speech cannot become a self statement.
+        text = " ".join(part.text for part in chain if isinstance(part, Plain)).strip()
     for component, label in (
         (Image, "图片"),
         (Record, "语音"),
